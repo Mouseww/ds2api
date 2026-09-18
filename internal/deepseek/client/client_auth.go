@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	dsprotocol "ds2api/internal/deepseek/protocol"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -57,6 +58,7 @@ func (c *Client) Login(ctx context.Context, acc config.Account) (string, error) 
 	if strings.TrimSpace(token) == "" {
 		return "", errors.New("missing login token")
 	}
+	logLoginBizData(acc, bizData)
 	ssoID, _ := user["id"].(string)
 	loginAuth := &auth.RequestAuth{
 		UseConfigToken: true,
@@ -67,6 +69,59 @@ func (c *Client) Login(ctx context.Context, acc config.Account) (string, error) 
 	auth.WithAuth(ctx, loginAuth)
 	c.reportClientSettingsAfterLogin(ctx, loginAuth, ssoID)
 	return token, nil
+}
+
+// logLoginBizData dumps the login response biz_data (secrets masked) so we can
+// identify the ban/status fields DeepSeek returns during token refresh.
+func logLoginBizData(acc config.Account, bizData map[string]any) {
+	b, err := json.Marshal(maskSecretValues(bizData))
+	if err != nil {
+		b = []byte(fmt.Sprintf("%#v", bizData))
+	}
+	config.Logger.Info("[login] biz_data dump", "account", acc.Identifier(), "biz_data", string(b))
+}
+
+func maskSecretValues(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, val := range t {
+			if isSecretKey(k) {
+				out[k] = maskTokenValue(val)
+			} else {
+				out[k] = maskSecretValues(val)
+			}
+		}
+		return out
+	case []any:
+		out := make([]any, len(t))
+		for i, val := range t {
+			out[i] = maskSecretValues(val)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+func isSecretKey(k string) bool {
+	lk := strings.ToLower(k)
+	return lk == "token" ||
+		lk == "jwt" ||
+		lk == "password" ||
+		lk == "secret" ||
+		strings.Contains(lk, "token")
+}
+
+func maskTokenValue(v any) string {
+	s, _ := v.(string)
+	if s == "" {
+		return ""
+	}
+	if len(s) <= 8 {
+		return "***"
+	}
+	return s[:4] + "***" + s[len(s)-4:]
 }
 
 func (c *Client) ensureAccountDeviceID(acc config.Account) (string, error) {
