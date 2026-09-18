@@ -132,7 +132,8 @@ flowchart LR
 | DeepSeek PoW | 纯 Go 高性能实现（DeepSeekHashV1），毫秒级响应 |
 | Tool Calling | 防泄漏处理：非代码块高置信特征识别、`delta.tool_calls` 早发、结构化增量输出 |
 | Admin API | 配置管理、运行时设置热更新、代理管理、账号测试 / 批量测试、会话清理、导入导出、Vercel 同步、版本检查 |
-| WebUI 管理台 | `/admin` 单页应用（中英文双语、深色模式，支持查看服务器端对话记录） |
+| WebUI 管理台 | `/admin` 单页应用（中英文双语、深色模式，支持查看服务器端对话记录）；`/admin` 默认落地页为 Dashboard 用量仪表盘（此前为 Accounts），显式路由如 `/admin/accounts` 不受影响 |
+| 管理后台 Dashboard | 可视化 Token 用量、请求次数、错误数、延迟，以及实时 RPM/TPM 与历史趋势图（`1h`/`24h`/`7d`/`30d`/`90d`/`1y`，数据来自 `GET /admin/usage-stats`） |
 | 运维探针 | `GET /healthz`（存活）、`GET /readyz`（就绪） |
 
 OpenAI `/v1/*` 仍是推荐的规范路径；同时支持 `/models`、`/chat/completions`、`/responses`、`/embeddings`、`/files`、`/files/{file_id}` 等根路径快捷路由，方便只配置 DS2API 根地址的第三方客户端。
@@ -328,6 +329,7 @@ go run ./cmd/ds2api
 - `current_input_file`：全局生效的上下文拆分上传策略；默认关闭，开启且阈值为 `0` 时，触发时将完整上下文合并上传为 `DS2API_HISTORY.txt` 上下文文件。
 - 如果关闭 `current_input_file`，请求会直接透传，不上传拆分上下文文件。
 - `thinking_injection`：默认关闭；开启后在最新 user 消息末尾追加思考增强提示词，提高高强度推理与工具调用前的思考稳定性；`prompt` 留空时使用内置默认提示词。
+- `DS2API_USAGE_STATS_PATH`（环境变量）：管理台 Dashboard 用量统计的持久化文件；默认 `data/usage_stats.json`，在 Vercel 上且未设置该变量时回落到 `/tmp/usage_stats.json`（运行时 `/var/task` 只读）。具体语义以 `internal/config/paths.go` 的 `UsageStatsPath()` 为准。
 
 环境变量完整列表见 [部署指南](docs/DEPLOY.md)，接口鉴权规则见 [API.md](API.md#鉴权规则)。
 

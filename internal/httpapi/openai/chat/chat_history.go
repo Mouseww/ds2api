@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	openaifmt "ds2api/internal/format/openai"
 	"ds2api/internal/prompt"
 	"ds2api/internal/promptcompat"
+	"ds2api/internal/usagestats"
 )
 
 type chatHistorySession struct {
@@ -22,29 +24,35 @@ type chatHistorySession struct {
 	finalPrompt string
 	startParams chathistory.StartParams
 	disabled    bool
+
+	// usageCtx carries the per-request usage recorder. It stays valid even when
+	// chat history is disabled, so the dashboard still accounts for tokens.
+	usageCtx  context.Context
+	model     string
+	accountID string
+	callerID  string
 }
 
 func startChatHistory(store *chathistory.Store, r *http.Request, a *auth.RequestAuth, stdReq promptcompat.StandardRequest) *chatHistorySession {
-	if store == nil || r == nil || a == nil {
+	if r == nil || a == nil {
 		return nil
 	}
-	if !store.Enabled() {
-		return nil
+	// The session also carries dashboard usage accounting, so it is created even
+	// when chat history is switched off; only persistence is gated below.
+	session := &chatHistorySession{
+		store:       store,
+		startedAt:   time.Now(),
+		lastPersist: time.Now(),
+		finalPrompt: stdReq.FinalPrompt,
+		usageCtx:    r.Context(),
+		model:       strings.TrimSpace(stdReq.ResponseModel),
+		accountID:   strings.TrimSpace(a.AccountID),
+		callerID:    strings.TrimSpace(a.CallerID),
 	}
-	if !shouldCaptureChatHistory(r) {
-		return nil
+	if store == nil || !store.Enabled() || !shouldCaptureChatHistory(r) {
+		session.disabled = true
+		return session
 	}
-	entry, err := store.Start(chathistory.StartParams{
-		CallerID:    strings.TrimSpace(a.CallerID),
-		AccountID:   strings.TrimSpace(a.AccountID),
-		Surface:     "openai.chat_completions",
-		Model:       strings.TrimSpace(stdReq.ResponseModel),
-		Stream:      stdReq.Stream,
-		UserInput:   extractSingleUserInput(stdReq.Messages),
-		Messages:    extractAllMessages(stdReq.Messages),
-		HistoryText: stdReq.HistoryText,
-		FinalPrompt: stdReq.FinalPrompt,
-	})
 	startParams := chathistory.StartParams{
 		CallerID:    strings.TrimSpace(a.CallerID),
 		AccountID:   strings.TrimSpace(a.AccountID),
@@ -56,18 +64,14 @@ func startChatHistory(store *chathistory.Store, r *http.Request, a *auth.Request
 		HistoryText: stdReq.HistoryText,
 		FinalPrompt: stdReq.FinalPrompt,
 	}
-	session := &chatHistorySession{
-		store:       store,
-		entryID:     entry.ID,
-		startedAt:   time.Now(),
-		lastPersist: time.Now(),
-		finalPrompt: stdReq.FinalPrompt,
-		startParams: startParams,
-	}
+	entry, err := store.Start(startParams)
+	session.entryID = entry.ID
+	session.startParams = startParams
 	if err != nil {
 		if entry.ID == "" {
 			config.Logger.Warn("[chat_history] start failed", "error", err)
-			return nil
+			session.disabled = true
+			return session
 		}
 		config.Logger.Warn("[chat_history] start persisted in memory after write failure", "error", err)
 	}
@@ -140,7 +144,11 @@ func (s *chatHistorySession) progress(thinking, content string) {
 }
 
 func (s *chatHistorySession) success(statusCode int, thinking, content, finishReason string, usage map[string]any) {
-	if s == nil || s.store == nil || s.disabled {
+	if s == nil {
+		return
+	}
+	usagestats.AnnotateUsage(s.usageCtx, s.model, s.accountID, s.callerID, usage)
+	if s.store == nil || s.disabled {
 		return
 	}
 	s.persistUpdate(chathistory.UpdateParams{
@@ -156,7 +164,12 @@ func (s *chatHistorySession) success(statusCode int, thinking, content, finishRe
 }
 
 func (s *chatHistorySession) error(statusCode int, message, finishReason, thinking, content string) {
-	if s == nil || s.store == nil || s.disabled {
+	if s == nil {
+		return
+	}
+	// Attribute the failure to the model/account even though no tokens were produced.
+	usagestats.Annotate(s.usageCtx, usagestats.Usage{Model: s.model, AccountID: s.accountID, CallerID: s.callerID})
+	if s.store == nil || s.disabled {
 		return
 	}
 	s.persistUpdate(chathistory.UpdateParams{
@@ -172,7 +185,12 @@ func (s *chatHistorySession) error(statusCode int, message, finishReason, thinki
 }
 
 func (s *chatHistorySession) stopped(thinking, content, finishReason string) {
-	if s == nil || s.store == nil || s.disabled {
+	if s == nil {
+		return
+	}
+	usage := openaifmt.BuildChatUsage(s.finalPrompt, thinking, content)
+	usagestats.AnnotateUsage(s.usageCtx, s.model, s.accountID, s.callerID, usage)
+	if s.store == nil || s.disabled {
 		return
 	}
 	s.persistUpdate(chathistory.UpdateParams{
@@ -182,7 +200,7 @@ func (s *chatHistorySession) stopped(thinking, content, finishReason string) {
 		StatusCode:       http.StatusOK,
 		ElapsedMs:        time.Since(s.startedAt).Milliseconds(),
 		FinishReason:     finishReason,
-		Usage:            openaifmt.BuildChatUsage(s.finalPrompt, thinking, content),
+		Usage:            usage,
 		Completed:        true,
 	})
 }

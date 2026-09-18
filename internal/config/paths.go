@@ -66,6 +66,16 @@ func ChatHistoryPath() string {
 	return ResolvePath("DS2API_CHAT_HISTORY_PATH", "data/chat_history.json")
 }
 
+// UsageStatsPath resolves where the admin dashboard persists aggregated usage
+// counters. It follows the same Vercel constraint as chat history: /var/task is
+// read-only at runtime, so /tmp is the only writable fallback.
+func UsageStatsPath() string {
+	if IsVercel() && strings.TrimSpace(os.Getenv("DS2API_USAGE_STATS_PATH")) == "" {
+		return "/tmp/usage_stats.json"
+	}
+	return ResolvePath("DS2API_USAGE_STATS_PATH", "data/usage_stats.json")
+}
+
 func StaticAdminDir() string {
 	return ResolvePath("DS2API_STATIC_ADMIN_DIR", "static/admin")
 }

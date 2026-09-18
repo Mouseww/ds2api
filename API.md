@@ -172,6 +172,8 @@ Gemini 兼容客户端还可以使用 `x-goog-api-key`、`?key=` 或 `?api_key=`
 | GET | `/admin/chat-history/{id}` | Admin | 查看单条服务器端对话记录 |
 | DELETE | `/admin/chat-history/{id}` | Admin | 删除单条服务器端对话记录 |
 | PUT | `/admin/chat-history/settings` | Admin | 更新对话记录保留条数 |
+| GET | `/admin/usage-stats` | Admin | 读取用量统计快照（Token / 请求数 / RPM / TPM） |
+| DELETE | `/admin/usage-stats` | Admin | 清空全部用量统计 |
 | GET | `/admin/version` | Admin | 查询当前版本与最新 Release |
 
 OpenAI `/v1/*` 仍是规范路径。对于只配置 DS2API 根地址的客户端，同一套 OpenAI handler 也通过根路径快捷路由暴露：`/models`、`/models/{id}`、`/chat/completions`、`/responses`、`/responses/{response_id}`、`/embeddings`、`/files`、`/files/{file_id}`。
@@ -1196,6 +1198,64 @@ data: {"type":"message_stop"}
 ```
 
 该接口与 `GET /admin/config/export` 返回相同内容，只是路径更短。
+
+### `GET /admin/usage-stats`
+
+读取 API 用量统计快照，供管理台「用量仪表盘」展示 Token 用量、请求次数与 RPM/TPM。
+
+**查询参数**
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `range` | string | 否 | 统计区间：`1h`、`24h`、`7d`、`30d`、`90d`、`1y`。默认 `24h`；非法值回落为 `24h` |
+
+**响应字段**
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `generated_at` | number | 快照生成时间（epoch 毫秒） |
+| `range` | string | 实际生效的统计区间 |
+| `bucket` | string | 时间分桶粒度：`minute` / `hour` / `day` |
+| `bucket_ms` | number | 单个分桶的毫秒数 |
+| `summary` | object | 所选区间的汇总（结构见下） |
+| `totals` | object | 进程启动至今的累计汇总（同结构） |
+| `series` | array | 时间序列，元素为 `{t, requests, errors, prompt_tokens, completion_tokens, reasoning_tokens, total_tokens}` |
+| `models` / `surfaces` / `accounts` / `callers` | array | 累计维度排行，元素为 `{key, requests, errors, prompt_tokens, completion_tokens, reasoning_tokens, total_tokens}` |
+| `live` | object | 实时滚动窗口：`{window_seconds, rpm, tpm, requests, total_tokens, series}` |
+| `retention` | object | 保留策略：`{live_seconds, minute_hours, hour_days, day_days}` |
+| `path` | string | 统计文件落盘路径（内存模式时省略该字段） |
+
+`summary` / `totals` 结构：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `requests` | number | 请求总数 |
+| `errors` | number | 非 2xx 请求数 |
+| `success_requests` | number | 成功请求数 |
+| `success_rate` | number | 成功率（百分比） |
+| `prompt_tokens` / `completion_tokens` / `reasoning_tokens` / `total_tokens` | number | Token 汇总 |
+| `avg_elapsed_ms` / `max_elapsed_ms` | number | 平均 / 最大耗时 |
+| `rpm` / `tpm` | number | 最近 60 秒折算的每分钟请求数 / Token 数 |
+| `peak_rpm` / `peak_tpm` | number | 保留期内最繁忙一分钟的请求数 / Token 数 |
+| `tracking_since` / `generated_at` | number | 开始统计时间 / 快照时间（epoch 毫秒） |
+
+**统计口径**
+
+- 请求数、错误数、耗时与 RPM/TPM 由服务端中间件在**每个请求结束时**记录，覆盖 OpenAI Chat / Responses / Embeddings / Files / Models、Claude Messages / Models、Gemini 以及 Ollama 等对外接口。
+- Token 数由各协议适配器在完成收尾时回填（流式与非流式一致），因此即使**关闭响应记录**（`chat_history` 保留条数为 0），Token 统计依然有效。
+- Vercel Node Runtime 的内部子请求（`__stream_prepare` / `__stream_release` / `__stream_pow` / `__stream_switch`）与管理台自身流量**不计入**统计。
+- `models` / `surfaces` / `accounts` / `callers` 为**累计维度**，不随 `range` 变化；每个维度最多保留 100 个键，超出部分归入 `(other)`，空标识归入 `(none)`。
+- 时间分桶按 epoch 对齐（UTC）；管理台按浏览器本地时区展示。
+- `peak_rpm` / `peak_tpm` 取自保留的分钟级分桶（48 小时），因此当 `range` 超过 48 小时时表示保留窗口内的峰值。
+- 数据默认落盘到 `data/usage_stats.json`（可用 `DS2API_USAGE_STATS_PATH` 覆盖）；未配置路径时仅保存在内存中，重启后清零。
+
+### `DELETE /admin/usage-stats`
+
+清空全部累计统计与时间分桶，并把开始统计时间重置为当前时间。
+
+```json
+{ "success": true }
+```
 
 ### `GET /admin/version`
 

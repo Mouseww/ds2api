@@ -74,6 +74,10 @@ func main() {
 		config.Logger.Error("graceful shutdown failed, forcing exit", "error", err)
 		os.Exit(1)
 	}
+	// Persist the last usage counters before the process exits.
+	if err := app.UsageStats.Close(); err != nil {
+		config.Logger.Warn("[usage_stats] flush on shutdown failed", "error", err)
+	}
 	config.Logger.Info("server gracefully stopped")
 }
 

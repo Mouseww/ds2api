@@ -22,10 +22,15 @@ import { useI18n } from '../i18n'
 const AccountManagerContainer = lazy(() => import('../features/account/AccountManagerContainer'))
 const ApiTesterContainer = lazy(() => import('../features/apiTester/ApiTesterContainer'))
 const ChatHistoryContainer = lazy(() => import('../features/chatHistory/ChatHistoryContainer'))
+const DashboardContainer = lazy(() => import('../features/dashboard/DashboardContainer'))
 const BatchImport = lazy(() => import('../components/BatchImport'))
 const VercelSyncContainer = lazy(() => import('../features/vercel/VercelSyncContainer'))
 const SettingsContainer = lazy(() => import('../features/settings/SettingsContainer'))
 const ProxyManagerContainer = lazy(() => import('../features/proxy/ProxyManagerContainer'))
+
+// The dashboard is the admin landing tab: the bare admin root renders the
+// overview while every other tab keeps its explicit /admin/<tab> route.
+const DEFAULT_TAB = 'dashboard'
 
 function TabLoadingFallback({ label }) {
     return (
@@ -45,6 +50,7 @@ export default function DashboardShell({ token, onLogout, config, fetchConfig, s
     const [sidebarOpen, setSidebarOpen] = useState(false)
 
     const navItems = [
+        { id: 'dashboard', label: t('nav.dashboard.label'), icon: LayoutDashboard, description: t('nav.dashboard.desc') },
         { id: 'accounts', label: t('nav.accounts.label'), icon: Users, description: t('nav.accounts.desc') },
         { id: 'proxies', label: t('nav.proxies.label'), icon: Globe, description: t('nav.proxies.desc') },
         { id: 'test', label: t('nav.test.label'), icon: Server, description: t('nav.test.desc') },
@@ -58,12 +64,12 @@ export default function DashboardShell({ token, onLogout, config, fetchConfig, s
     const pathSegments = location.pathname.replace(/^\/+|\/+$/g, '').split('/').filter(Boolean)
     const routeSegments = pathSegments[0] === 'admin' ? pathSegments.slice(1) : pathSegments
     const pathTab = routeSegments[0] || ''
-    const activeTab = tabIds.has(pathTab) ? pathTab : 'accounts'
+    const activeTab = tabIds.has(pathTab) ? pathTab : DEFAULT_TAB
     const adminBasePath = pathSegments[0] === 'admin' ? '/admin' : ''
     const activeNavItem = navItems.find(n => n.id === activeTab)
 
     const navigateToTab = useCallback((tabID) => {
-        const nextPath = tabID === 'accounts'
+        const nextPath = tabID === DEFAULT_TAB
             ? `${adminBasePath || ''}/`
             : `${adminBasePath}/${tabID}`
         navigate(nextPath)
@@ -109,6 +115,8 @@ export default function DashboardShell({ token, onLogout, config, fetchConfig, s
     }, [authFetch])
     const renderTab = () => {
         switch (activeTab) {
+            case 'dashboard':
+                return <DashboardContainer authFetch={authFetch} />
             case 'accounts':
                 return <AccountManagerContainer config={config} onRefresh={fetchConfig} onMessage={showMessage} authFetch={authFetch} />
             case 'proxies':

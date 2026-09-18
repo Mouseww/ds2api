@@ -13,8 +13,10 @@ import (
 	adminrawsamples "ds2api/internal/httpapi/admin/rawsamples"
 	adminsettings "ds2api/internal/httpapi/admin/settings"
 	adminshared "ds2api/internal/httpapi/admin/shared"
+	adminusage "ds2api/internal/httpapi/admin/usage"
 	adminvercel "ds2api/internal/httpapi/admin/vercel"
 	adminversion "ds2api/internal/httpapi/admin/version"
+	"ds2api/internal/usagestats"
 )
 
 type Handler struct {
@@ -23,6 +25,7 @@ type Handler struct {
 	DS          adminshared.DeepSeekCaller
 	OpenAI      adminshared.OpenAIChatCaller
 	ChatHistory *chathistory.Store
+	UsageStats  *usagestats.Store
 }
 
 func RegisterRoutes(r chi.Router, h *Handler) {
@@ -37,6 +40,7 @@ func RegisterRoutes(r chi.Router, h *Handler) {
 	historyHandler := &adminhistory.Handler{Store: deps.Store, Pool: deps.Pool, DS: deps.DS, OpenAI: deps.OpenAI, ChatHistory: deps.ChatHistory}
 	devCaptureHandler := &admindevcapture.Handler{Store: deps.Store, Pool: deps.Pool, DS: deps.DS, OpenAI: deps.OpenAI, ChatHistory: deps.ChatHistory}
 	versionHandler := &adminversion.Handler{Store: deps.Store, Pool: deps.Pool, DS: deps.DS, OpenAI: deps.OpenAI, ChatHistory: deps.ChatHistory}
+	usageHandler := &adminusage.Handler{UsageStats: deps.UsageStats}
 
 	adminauth.RegisterPublicRoutes(r, authHandler)
 	r.Group(func(pr chi.Router) {
@@ -50,6 +54,7 @@ func RegisterRoutes(r chi.Router, h *Handler) {
 		adminvercel.RegisterRoutes(pr, vercelHandler)
 		admindevcapture.RegisterRoutes(pr, devCaptureHandler)
 		adminhistory.RegisterRoutes(pr, historyHandler)
+		adminusage.RegisterRoutes(pr, usageHandler)
 		adminversion.RegisterRoutes(pr, versionHandler)
 	})
 }
@@ -58,7 +63,7 @@ func adminsharedDeps(h *Handler) adminsharedDepsValue {
 	if h == nil {
 		return adminsharedDepsValue{}
 	}
-	return adminsharedDepsValue{Store: h.Store, Pool: h.Pool, DS: h.DS, OpenAI: h.OpenAI, ChatHistory: h.ChatHistory}
+	return adminsharedDepsValue{Store: h.Store, Pool: h.Pool, DS: h.DS, OpenAI: h.OpenAI, ChatHistory: h.ChatHistory, UsageStats: h.UsageStats}
 }
 
 type adminsharedDepsValue struct {
@@ -67,4 +72,5 @@ type adminsharedDepsValue struct {
 	DS          adminshared.DeepSeekCaller
 	OpenAI      adminshared.OpenAIChatCaller
 	ChatHistory *chathistory.Store
+	UsageStats  *usagestats.Store
 }

@@ -172,6 +172,8 @@ Gemini-compatible clients can also send `x-goog-api-key`, `?key=`, or `?api_key=
 | GET | `/admin/chat-history/{id}` | Admin | Read one server-side conversation entry |
 | DELETE | `/admin/chat-history/{id}` | Admin | Delete one server-side conversation entry |
 | PUT | `/admin/chat-history/settings` | Admin | Update conversation history retention limit |
+| GET | `/admin/usage-stats` | Admin | Read the usage snapshot (tokens / requests / RPM / TPM) |
+| DELETE | `/admin/usage-stats` | Admin | Reset all usage statistics |
 | GET | `/admin/version` | Admin | Check current version and latest Release |
 
 OpenAI `/v1/*` paths are canonical. For clients configured with the bare DS2API service URL, the same OpenAI handlers are also exposed through root shortcuts: `/models`, `/models/{id}`, `/chat/completions`, `/responses`, `/responses/{response_id}`, `/embeddings`, `/files`, and `/files/{file_id}`.
@@ -1188,6 +1190,79 @@ Failed account checks are returned in `failed_accounts`, and any saved Vercel cr
 ```
 
 This is the same payload as `GET /admin/config/export`, just with a shorter path.
+
+### `GET /admin/usage-stats`
+
+Reads the API usage snapshot that backs the admin "usage dashboard": token consumption, request counts and RPM/TPM. Admin authentication is required.
+
+**Query parameters**
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `range` | string | No | Statistics range: `1h`, `24h`, `7d`, `30d`, `90d`, `1y`. Defaults to `24h`; invalid values fall back to `24h` |
+
+Each range renders at its own bucket granularity:
+
+| `range` | Bucket granularity | `bucket` | `bucket_ms` |
+| --- | --- | --- | --- |
+| `1h` | 1 minute | `1m` | 60000 |
+| `24h` | 10 minutes | `10m` | 600000 |
+| `7d` | 1 hour | `1h` | 3600000 |
+| `30d` | 6 hours | `6h` | 21600000 |
+| `90d` | 1 day | `1d` | 86400000 |
+| `1y` | 7 days | `7d` | 604800000 |
+
+**Response fields**
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `generated_at` | number | Snapshot creation time (epoch milliseconds) |
+| `range` | string | The statistics range that actually took effect |
+| `bucket` | string | Time bucket granularity: `minute` / `hour` / `day` |
+| `bucket_ms` | number | Length of a single bucket in milliseconds |
+| `summary` | object | Aggregate for the selected range (structure below) |
+| `totals` | object | Cumulative aggregate since process start (same structure) |
+| `series` | array | Time series; each element is `{t, requests, errors, prompt_tokens, completion_tokens, reasoning_tokens, total_tokens}` |
+| `models` / `surfaces` / `accounts` / `callers` | array | Cumulative breakdown leaderboards; each element is `{key, requests, errors, prompt_tokens, completion_tokens, reasoning_tokens, total_tokens}` |
+| `live` | object | Live rolling window: `{window_seconds, rpm, tpm, requests, total_tokens, series}` |
+| `retention` | object | Retention policy: `{live_seconds, minute_hours, hour_days, day_days}` |
+| `path` | string | On-disk path of the statistics file (omitted in memory-only mode) |
+
+The response always carries `Cache-Control: no-store`, because the counters change on every request.
+
+`summary` / `totals` structure:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `requests` | number | Total number of requests |
+| `errors` | number | Number of non-2xx requests |
+| `success_requests` | number | Number of successful requests |
+| `success_rate` | number | Success rate (percentage) |
+| `prompt_tokens` / `completion_tokens` / `reasoning_tokens` / `total_tokens` | number | Token totals |
+| `avg_elapsed_ms` / `max_elapsed_ms` | number | Average / maximum elapsed time |
+| `rpm` / `tpm` | number | Requests / tokens per minute extrapolated from the last 60 seconds |
+| `peak_rpm` / `peak_tpm` | number | Requests / tokens of the busiest minute inside the retention window |
+| `tracking_since` / `generated_at` | number | Tracking start time / snapshot time (epoch milliseconds) |
+
+`models`, `surfaces`, `accounts` and `callers` are cumulative leaderboards: they do not change with `range`.
+
+**Statistics scope**
+
+- Request counts, error counts, latency and RPM/TPM are recorded by server middleware **when each request finishes**, covering the public OpenAI Chat / Responses / Embeddings / Files / Models, Claude Messages / Models, Gemini and Ollama endpoints.
+- Token counts are filled in by the protocol adapters when they finalize the response (streaming and non-streaming alike), so token accounting still works even when **response recording is disabled** (`chat_history` retention set to 0).
+- Internal subrequests of the Vercel Node runtime (`__stream_prepare` / `__stream_release` / `__stream_pow` / `__stream_switch`) and the admin dashboard's own traffic are **not counted**.
+- `models` / `surfaces` / `accounts` / `callers` are **cumulative dimensions** and do not follow `range`; each dimension keeps at most 100 keys, keys beyond that are folded into `(other)`, and empty identities are folded into `(none)`.
+- Time buckets are aligned to epoch multiples (UTC); the dashboard renders them in the browser's local time zone.
+- `peak_rpm` / `peak_tpm` are taken from the retained minute buckets (48 hours), so when `range` is longer than 48 hours they describe the peak inside the retention window.
+- Data is persisted to `data/usage_stats.json` by default (override with `DS2API_USAGE_STATS_PATH`); with no configured path it is kept in memory only and resets on restart. On Vercel, when `DS2API_USAGE_STATS_PATH` is not set, the path is `/tmp/usage_stats.json`.
+
+### `DELETE /admin/usage-stats`
+
+Clears all cumulative statistics and time buckets, and resets the tracking start time to the current time. Admin authentication is required.
+
+```json
+{ "success": true }
+```
 
 ### `GET /admin/version`
 

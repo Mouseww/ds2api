@@ -68,6 +68,7 @@ ds2api/
 │   ├── toolcall/                         # 工具调用解析与修复
 │   ├── toolstream/                       # Go 流式 tool call 防泄漏与增量检测
 │   ├── translatorcliproxy/               # Vercel/fallback/测试用协议互转桥
+│   ├── usagestats/                       # 管理台 Dashboard 用量统计：按请求采集、分桶存储与聚合
 │   ├── util/                             # 通用工具函数
 │   ├── version/                          # 版本查询/比较
 │   └── webui/                            # WebUI 静态托管相关逻辑
@@ -203,6 +204,7 @@ flowchart LR
 - `internal/httpapi/admin/*`：Admin API 根装配与 auth/accounts/config/settings/proxies/rawsamples/vercel/history/devcapture/version 等资源子包。
 - `internal/chathistory`：服务器端对话记录持久化、分页、单条详情和保留策略。
 - `internal/responsehistory`：DeepSeek 上游响应归档，会在协议回译/裁剪前保存 assistant text、thinking、tool-call 原始片段和流式详情。
+- `internal/usagestats`：管理台 Dashboard 用量统计；HTTP 中间件按请求采集用量事件，按秒/分/时/天分桶存储并原子落盘，提供范围查询聚合与 RPM/TPM 计算。
 - `internal/config`：配置加载、校验、运行时 settings 热更新。
 - `internal/account`：托管账号池、并发槽位、等待队列。
 - `internal/textclean`：文本清洗，移除 `[reference: N]` 标记等噪声。

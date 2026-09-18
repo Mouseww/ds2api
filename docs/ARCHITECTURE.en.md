@@ -68,6 +68,7 @@ ds2api/
 │   ├── toolcall/                         # Tool-call parsing and repair
 │   ├── toolstream/                       # Go streaming tool-call anti-leak and delta detection
 │   ├── translatorcliproxy/               # Vercel/fallback/test protocol translation bridge
+│   ├── usagestats/                       # Admin dashboard usage stats: per-request capture, bucketed storage, aggregation
 │   ├── util/                             # Shared utility helpers
 │   ├── version/                          # Version query/compare
 │   └── webui/                            # WebUI static hosting logic
@@ -203,6 +204,7 @@ flowchart LR
 - `internal/httpapi/admin/*`: Admin API root assembly plus auth/accounts/config/settings/proxies/rawsamples/vercel/history/devcapture/version resource packages.
 - `internal/chathistory`: server-side conversation history persistence, pagination, detail lookup, and retention policy.
 - `internal/responsehistory`: DeepSeek upstream response archive, saving assistant text, thinking, raw tool-call fragments, and streaming detail before protocol rendering/trimming.
+- `internal/usagestats`: usage statistics for the admin dashboard; HTTP middleware records one usage event per request, stores second/minute/hour/day buckets with atomic file persistence, and serves range aggregation queries plus RPM/TPM computation.
 - `internal/config`: config loading/validation + runtime settings hot-reload.
 - `internal/account`: managed account pool, inflight slots, waiting queue.
 - `internal/textclean`: text cleanup helpers, e.g. stripping `[reference: N]` markers.

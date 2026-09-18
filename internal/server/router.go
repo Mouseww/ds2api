@@ -30,15 +30,17 @@ import (
 	"ds2api/internal/httpapi/openai/responses"
 	"ds2api/internal/httpapi/openai/shared"
 	"ds2api/internal/httpapi/requestbody"
+	"ds2api/internal/usagestats"
 	"ds2api/internal/webui"
 )
 
 type App struct {
-	Store    *config.Store
-	Pool     *account.Pool
-	Resolver *auth.Resolver
-	DS       *dsclient.Client
-	Router   http.Handler
+	Store      *config.Store
+	Pool       *account.Pool
+	Resolver   *auth.Resolver
+	DS         *dsclient.Client
+	Router     http.Handler
+	UsageStats *usagestats.Store
 }
 
 func NewApp() (*App, error) {
@@ -61,6 +63,10 @@ func NewApp() (*App, error) {
 	if err := chatHistoryStore.Err(); err != nil {
 		config.Logger.Warn("[chat_history] unavailable", "path", chatHistoryStore.Path(), "error", err)
 	}
+	usageStats := usagestats.NewStore(config.UsageStatsPath())
+	if err := usageStats.Err(); err != nil {
+		config.Logger.Warn("[usage_stats] unavailable", "path", usageStats.Path(), "error", err)
+	}
 
 	modelsHandler := &shared.ModelsHandler{Store: store}
 	chatHandler := &chat.Handler{Store: store, Auth: resolver, DS: dsClient, ChatHistory: chatHistoryStore}
@@ -69,7 +75,7 @@ func NewApp() (*App, error) {
 	embeddingsHandler := &embeddings.Handler{Store: store, Auth: resolver, DS: dsClient, ChatHistory: chatHistoryStore}
 	claudeHandler := &claude.Handler{Store: store, Auth: resolver, DS: dsClient, OpenAI: chatHandler, ChatHistory: chatHistoryStore}
 	geminiHandler := &gemini.Handler{Store: store, Auth: resolver, DS: dsClient, OpenAI: chatHandler, ChatHistory: chatHistoryStore}
-	adminHandler := &admin.Handler{Store: store, Pool: pool, DS: dsClient, OpenAI: chatHandler, ChatHistory: chatHistoryStore}
+	adminHandler := &admin.Handler{Store: store, Pool: pool, DS: dsClient, OpenAI: chatHandler, ChatHistory: chatHistoryStore, UsageStats: usageStats}
 	ollamaHandler := &ollama.Handler{Store: store}
 	webuiHandler := webui.NewHandler()
 
@@ -78,6 +84,7 @@ func NewApp() (*App, error) {
 	r.Use(middleware.RealIP)
 	r.Use(filteredLogger())
 	r.Use(middleware.Recoverer)
+	r.Use(usagestats.Middleware(usageStats))
 	r.Use(cors)
 	r.Use(requestbody.ValidateJSONUTF8)
 	r.Use(timeout(0))
@@ -127,7 +134,7 @@ func NewApp() (*App, error) {
 		http.NotFound(w, req)
 	})
 
-	return &App{Store: store, Pool: pool, Resolver: resolver, DS: dsClient, Router: r}, nil
+	return &App{Store: store, Pool: pool, Resolver: resolver, DS: dsClient, Router: r, UsageStats: usageStats}, nil
 }
 
 func timeout(d time.Duration) func(http.Handler) http.Handler {

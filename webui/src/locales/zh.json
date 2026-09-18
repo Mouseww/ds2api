@@ -1,10 +1,78 @@
 {
+    "dashboard": {
+        "title": "用量仪表盘",
+        "desc": "Token 用量、请求次数、RPM/TPM 速率与调用分布统计",
+        "ranges": {
+            "1h": "1 小时",
+            "24h": "24 小时",
+            "7d": "7 天",
+            "30d": "30 天",
+            "90d": "90 天",
+            "1y": "1 年"
+        },
+        "metric": {
+            "requests": "请求次数",
+            "tokens": "Token",
+            "errors": "错误次数"
+        },
+        "refresh": "刷新",
+        "liveRpm": "实时 RPM",
+        "liveTpm": "实时 TPM",
+        "liveWindow": "最近 {seconds} 秒滚动窗口",
+        "unitRpm": "次/分",
+        "unitTpm": "Token/分",
+        "peakRpm": "历史峰值 RPM",
+        "peakTpm": "历史峰值 TPM",
+        "peakHint": "保留期内最繁忙的一分钟",
+        "kpiTitle": "区间统计",
+        "kpiDesc": "所选时间范围内的请求与 Token 汇总",
+        "requests": "请求次数",
+        "errors": "错误次数",
+        "totalTokens": "总 Token",
+        "promptTokens": "输入 Token",
+        "completionTokens": "输出 Token",
+        "reasoningTokens": "思维链 Token",
+        "avgLatency": "平均延迟",
+        "maxLatency": "最大延迟",
+        "latencyHint": "从收到请求到响应完成",
+        "successRateHint": "成功率 {value}",
+        "exactHint": "精确值 {value}",
+        "trendTitle": "趋势",
+        "trendDesc": "按时间分桶聚合，悬停查看每个分桶的数值",
+        "breakdownTitle": "调用分布",
+        "breakdownDesc": "累计维度统计，不受上方时间范围影响",
+        "allTimeRequests": "累计请求",
+        "allTimeTokens": "累计 Token",
+        "byModel": "按模型",
+        "bySurface": "按接口",
+        "byAccount": "按账号",
+        "byCaller": "按调用方",
+        "requestsUnit": "次",
+        "errorsUnit": "次错误",
+        "noTraffic": "暂无请求",
+        "loading": "加载中…",
+        "loadFailed": "加载用量统计失败",
+        "empty": "暂无数据",
+        "retentionValue": "保留：实时 {live}s · 分钟桶 {minutes}h · 小时桶 {hours}d · 天桶 {days}d",
+        "storage": "存储",
+        "noPersistence": "当前为内存统计，重启后清空",
+        "updatedAt": "更新于",
+        "reset": "重置统计",
+        "resetConfirm": "清空全部用量统计？",
+        "resetConfirmAction": "确认清空",
+        "resetCancel": "取消",
+        "resetFailed": "重置失败"
+    },
     "language": {
         "label": "语言",
         "english": "English",
         "chinese": "中文"
     },
     "nav": {
+        "dashboard": {
+            "label": "用量仪表盘",
+            "desc": "Token 用量、请求次数与 RPM/TPM 统计"
+        },
         "accounts": {
             "label": "账号管理",
             "desc": "管理 DeepSeek 账号池"

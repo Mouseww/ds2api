@@ -1,10 +1,78 @@
 {
+    "dashboard": {
+        "title": "Usage Dashboard",
+        "desc": "Token usage, request counts, RPM/TPM rates and traffic breakdowns",
+        "ranges": {
+            "1h": "1h",
+            "24h": "24h",
+            "7d": "7d",
+            "30d": "30d",
+            "90d": "90d",
+            "1y": "1y"
+        },
+        "metric": {
+            "requests": "Requests",
+            "tokens": "Tokens",
+            "errors": "Errors"
+        },
+        "refresh": "Refresh",
+        "liveRpm": "Live RPM",
+        "liveTpm": "Live TPM",
+        "liveWindow": "Rolling {seconds}s window",
+        "unitRpm": "req/min",
+        "unitTpm": "tokens/min",
+        "peakRpm": "Peak RPM",
+        "peakTpm": "Peak TPM",
+        "peakHint": "busiest retained minute",
+        "kpiTitle": "Range totals",
+        "kpiDesc": "Requests and tokens inside the selected time range",
+        "requests": "Requests",
+        "errors": "Errors",
+        "totalTokens": "Total tokens",
+        "promptTokens": "Prompt tokens",
+        "completionTokens": "Completion tokens",
+        "reasoningTokens": "Reasoning tokens",
+        "avgLatency": "Avg latency",
+        "maxLatency": "Max latency",
+        "latencyHint": "Request received to response complete",
+        "successRateHint": "Success rate {value}",
+        "exactHint": "Exact {value}",
+        "trendTitle": "Trend",
+        "trendDesc": "Aggregated per time bucket; hover to inspect a bucket",
+        "breakdownTitle": "Traffic breakdown",
+        "breakdownDesc": "All-time dimensions, independent of the range above",
+        "allTimeRequests": "All-time requests",
+        "allTimeTokens": "All-time tokens",
+        "byModel": "By model",
+        "bySurface": "By surface",
+        "byAccount": "By account",
+        "byCaller": "By caller",
+        "requestsUnit": "req",
+        "errorsUnit": "errors",
+        "noTraffic": "No traffic yet",
+        "loading": "Loading…",
+        "loadFailed": "Failed to load usage statistics",
+        "empty": "No data yet",
+        "retentionValue": "Retention: live {live}s · minute {minutes}h · hour {hours}d · day {days}d",
+        "storage": "Storage",
+        "noPersistence": "In-memory only; counters reset on restart",
+        "updatedAt": "Updated",
+        "reset": "Reset statistics",
+        "resetConfirm": "Clear all usage statistics?",
+        "resetConfirmAction": "Clear everything",
+        "resetCancel": "Cancel",
+        "resetFailed": "Reset failed"
+    },
     "language": {
         "label": "Language",
         "english": "English",
         "chinese": "中文"
     },
     "nav": {
+        "dashboard": {
+            "label": "Usage Dashboard",
+            "desc": "Token usage, request counts and RPM/TPM statistics"
+        },
         "accounts": {
             "label": "Account Management",
             "desc": "Manage the DeepSeek account pool"

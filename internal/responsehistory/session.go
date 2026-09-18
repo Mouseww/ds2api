@@ -1,6 +1,7 @@
 package responsehistory
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"ds2api/internal/config"
 	"ds2api/internal/prompt"
 	"ds2api/internal/promptcompat"
+	"ds2api/internal/usagestats"
 )
 
 type Session struct {
@@ -21,6 +23,13 @@ type Session struct {
 	lastPersist time.Time
 	startParams chathistory.StartParams
 	disabled    bool
+
+	// usageCtx carries the per-request usage recorder. It stays valid even when
+	// chat history is disabled, so the dashboard still accounts for tokens.
+	usageCtx  context.Context
+	model     string
+	accountID string
+	callerID  string
 }
 
 type StartParams struct {
@@ -32,11 +41,23 @@ type StartParams struct {
 }
 
 func Start(params StartParams) *Session {
-	if params.Store == nil || params.Request == nil || params.Auth == nil {
+	// The session also carries dashboard usage accounting, so it is created even
+	// when chat history is switched off; only persistence is gated below.
+	if params.Request == nil || params.Auth == nil {
 		return nil
 	}
-	if !params.Store.Enabled() || !shouldCapture(params.Request) {
-		return nil
+	session := &Session{
+		store:       params.Store,
+		startedAt:   time.Now(),
+		lastPersist: time.Now(),
+		usageCtx:    params.Request.Context(),
+		model:       strings.TrimSpace(params.Standard.ResponseModel),
+		accountID:   strings.TrimSpace(params.Auth.AccountID),
+		callerID:    strings.TrimSpace(params.Auth.CallerID),
+	}
+	if params.Store == nil || !params.Store.Enabled() || !shouldCapture(params.Request) {
+		session.disabled = true
+		return session
 	}
 	startParams := chathistory.StartParams{
 		CallerID:    strings.TrimSpace(params.Auth.CallerID),
@@ -50,17 +71,13 @@ func Start(params StartParams) *Session {
 		FinalPrompt: params.Standard.FinalPrompt,
 	}
 	entry, err := params.Store.Start(startParams)
-	session := &Session{
-		store:       params.Store,
-		entryID:     entry.ID,
-		startedAt:   time.Now(),
-		lastPersist: time.Now(),
-		startParams: startParams,
-	}
+	session.entryID = entry.ID
+	session.startParams = startParams
 	if err != nil {
 		if entry.ID == "" {
 			config.Logger.Warn("[response_history] start failed", "surface", startParams.Surface, "error", err)
-			return nil
+			session.disabled = true
+			return session
 		}
 		config.Logger.Warn("[response_history] start persisted in memory after write failure", "surface", startParams.Surface, "error", err)
 	}
@@ -136,7 +153,11 @@ func (s *Session) Progress(thinking, content string) {
 }
 
 func (s *Session) Success(statusCode int, thinking, content, finishReason string, usage map[string]any) {
-	if s == nil || s.store == nil || s.disabled {
+	if s == nil {
+		return
+	}
+	usagestats.AnnotateUsage(s.usageCtx, s.model, s.accountID, s.callerID, usage)
+	if s.store == nil || s.disabled {
 		return
 	}
 	s.persistUpdate(chathistory.UpdateParams{
@@ -152,7 +173,12 @@ func (s *Session) Success(statusCode int, thinking, content, finishReason string
 }
 
 func (s *Session) Error(statusCode int, message, finishReason, thinking, content string) {
-	if s == nil || s.store == nil || s.disabled {
+	if s == nil {
+		return
+	}
+	// Attribute the failure to the model/account even though no tokens were produced.
+	usagestats.Annotate(s.usageCtx, usagestats.Usage{Model: s.model, AccountID: s.accountID, CallerID: s.callerID})
+	if s.store == nil || s.disabled {
 		return
 	}
 	s.persistUpdate(chathistory.UpdateParams{
