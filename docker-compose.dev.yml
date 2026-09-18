@@ -11,7 +11,7 @@ services:
   ds2api:
     build:
       context: .
-      target: go-builder
+      target: dev
     image: ds2api:dev
     container_name: ds2api-dev
     command: ["go", "run", "./cmd/ds2api"]

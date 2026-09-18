@@ -22,6 +22,15 @@ RUN set -eux; \
     if [ -z "${BUILD_VERSION_RESOLVED}" ] && [ -f VERSION ]; then BUILD_VERSION_RESOLVED="$(cat VERSION | tr -d "[:space:]")"; fi; \
     CGO_ENABLED=0 GOOS="${GOOS}" GOARCH="${GOARCH}" go build -buildvcs=false -ldflags="-s -w -X ds2api/internal/version.BuildVersion=${BUILD_VERSION_RESOLVED}" -o /out/ds2api ./cmd/ds2api
 
+FROM golang:1.26 AS dev
+# Node.js for webui auto-build on startup (used by docker-compose.dev.yml)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends nodejs npm \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY go.mod go.sum* ./
+RUN go mod download
+
 FROM busybox:1.36.1-musl AS busybox-tools
 
 FROM debian:bookworm-slim AS runtime-base
