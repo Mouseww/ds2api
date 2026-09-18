@@ -41,6 +41,7 @@
 - 如果模型漏掉 opening wrapper，但后面仍输出了一个或多个 invoke 并以 closing wrapper 收尾，Go 解析链路会在解析前补回缺失的 opening wrapper。
 - 在进入现有 DSML rewrite / XML parse 之前，Go / Node 都会先做一次非常窄的 candidate-span canonicalization：只处理已经被 scanner 识别为工具标签壳的 wrapper / `invoke` / `parameter` / `name` / `CDATA` / `DSML` 及其结构分隔符；这里会移除零宽 / BOM / 控制类干扰字符，并把 `<`、`>`、`/`、`|`、`=`、引号、Unicode 空白、常见 dash / underscore 变体这类工具语法外壳符号折回 ASCII 语义。
 - Go / Node 解析层不再枚举每一种 DSML typo。它以固定本地标签名 `tool_calls` / `invoke` / `parameter` 为准，把标签名前的任意协议前缀壳视为可容忍噪声，并继续兼容半角管道符、全角感叹号 `！`、顿号 `、`、空白、重复 leading `<`、可视控制符 `␂`、原始 STX `\x02`、非 ASCII 分隔符、CJK 尖括号 `〈` / `〉`、弯引号属性值、PascalCase 本地名等漂移。例如 `<DSML|tool_calls>`、`<<|DSML|tool_calls>`、`<|DSML tool_calls>`、`<DSMLtool_calls>`、`<DSmartToolCalls>`、`<<DSML|DSML|tool_calls>`、`<DSML␂tool_calls>`、`<proto💥tool_calls>`、`<DSM|tool_calls>...〈/DSM|tool_calls〉`、`<！DSML！tool_calls>...<！/DSML！tool_calls>`、`<、DSML、tool_calls>...<、/DSML、tool_calls>` 都会归一化；相似但非固定标签名（如 `tool_calls_extra` / `ToolCallsExtra`）仍按普通文本处理。DSML 语境下还接受 `tool_calls` 的 `calls` 简写与重复分隔符漂移（如 `<｜｜DSML｜｜ calls>` / `<｜DSML｜｜ invoke>`，含 `string="true|false"` 这类多余参数属性），但 `calls` 作为通用词只在标签前缀里存在 DSML 证据时才识别为 `tool_calls`：裸 `<tool-calls>` 与正文中的 `<calls` 仍按普通文本处理。
+- 闭标签按固定本地名匹配，不要求与开标签同属同一标记族。当客户端 harness 自带另一套工具标记语法并同时注入格式指令时，模型可能输出“混合族”工具块：DSML 开标签配外族闭标签（如 `<｜｜DSML｜｜ parameter>...</|EPSE|parameter>`），甚至 `calls` 简写 wrapper 以 `</|EPSE|tool_calls>` 收尾。这类混合块仍按本地名 `tool_calls` / `invoke` / `parameter` 匹配闭标签并正常执行。两个字节级生产泄漏样本（`calls` 简写 + 重复分隔符 + `string="true"` + CDATA 的 pwsh/glob 块，以及上述混合族块）已固化为回归测试：`internal/toolcall/dsml_leak_regression_test.go`、`internal/toolstream/dsml_leak_regression_sieve_test.go`、`internal/httpapi/openai/chat/handler_leak_regression_test.go`、`tests/node/dsml-leak-regression.test.js`。
 - 这个 candidate-span canonicalization 不会对普通 prose、参数正文、CDATA 内容或嵌套的非工具 XML 做广义 Unicode 归一化。也就是说，参数里的示例 `<invοke>`、普通聊天文本里的 confusable 单词、或其他非工具壳 XML 片段都保持原样；只有真正落在工具标签壳上的 whitelist 关键字和结构符号会被折叠。
 - 如果模型在固定工具标签名后多输出一个非结构性分隔符，例如 `<|DSML|tool_calls|` / `<|DSML|invoke|` / `<|DSML|parameter|` / `<DSMLtool_calls※>`，或在带属性标签的结束符前多输出一个尾部分隔符（如 `<DSM|parameter name="command"|>`），兼容层会把这个尾部分隔符当作异常标签终止符并补齐或归一化；如果后面已经有 `>` / `〉`，也会消费这个多余分隔符后再归一化。结构性字符如 `<` / `>` / `/` / `=` / 引号、空白和 ASCII 字母数字不会被当作这类分隔符。
 - “缺失 opening wrapper”的修复只会在 wrapper-confidence 足够高时触发：scanner 必须已经识别出白名单工具壳结构（wrapper / invoke / parameter / `name=` 等），且剩余失败看起来只是壳层结构问题。相似但不在白名单内的 near-miss 标签名，或缺少足够 wrapper 证据的 malformed 片段，仍会按普通文本透传。
@@ -109,6 +110,7 @@ go test -v -run 'TestParseToolCalls|TestProcessToolSieve' ./internal/toolcall ./
 - legacy canonical `<tool_calls>` wrapper 正常解析
 - 固定本地标签名的 DSML 噪声容错形态（如 `<DSML|tool_calls>`、`<<|DSML|tool_calls>`、`<|DSML tool_calls>`、`<DSMLtool_calls>`、`<DSmartToolCalls>`、`<<DSML|DSML|tool_calls>`、`<DSM|tool_calls>...〈/DSM|tool_calls〉`、`<！DSML！tool_calls>...<！/DSML！tool_calls>`）正常解析
 - 混搭标签（DSML wrapper + canonical inner）归一化后正常解析
+- 字节级生产泄漏样本回归：`calls` 简写 + 双全角管道 + `string="true"` + CDATA 的 pwsh/glob 块，与 DSML 开标签配 `<|EPSE|...>` 外族闭标签的混合族块，在终端解析、流式 sieve（多种分块大小）与完整流式 handler 下都执行为结构化 tool_calls 且零泄漏
 - 波浪线围栏 `~~~` 内的示例不执行
 - 嵌套围栏（4 反引号嵌套 3 反引号）内的示例不执行
 - Markdown 行内 code span 内的完整工具调用示例不执行
