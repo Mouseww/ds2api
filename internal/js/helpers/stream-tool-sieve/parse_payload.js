@@ -6,6 +6,7 @@ const TOOL_MARKUP_NAMES = [
   { raw: 'tool_calls', canonical: 'tool_calls' },
   { raw: 'tool-calls', canonical: 'tool_calls', dsmlOnly: true },
   { raw: 'toolcalls', canonical: 'tool_calls', dsmlOnly: true },
+  { raw: 'calls', canonical: 'tool_calls', dsmlOnly: true, noPrefixValidate: true },
   { raw: 'invoke', canonical: 'invoke' },
   { raw: 'parameter', canonical: 'parameter' },
 ];
@@ -808,6 +809,12 @@ function matchToolMarkupNameAfterArbitraryPrefix(raw, start) {
       if (!toolMarkupPrefixAllowsLocalNameAt(raw, start, idx)) {
         continue;
       }
+      // Generic names (e.g. 'calls') are too common to accept after an
+      // arbitrary prefix like 'tool-': require explicit DSML evidence in
+      // the prefix so bare lookalikes stay plain text (Go/Node parity).
+      if (name.noPrefixValidate && !toolMarkupPrefixContainsDSML(raw.slice(start, idx))) {
+        continue;
+      }
       return { ok: true, name: name.canonical, start: idx, len: matched.next - idx };
     }
     idx += 1;
@@ -840,7 +847,7 @@ function toolMarkupPrefixAllowsLocalName(prefix) {
   if (!prefix) {
     return false;
   }
-  if (normalizedASCIITailAt(prefix, 0).includes('dsml')) {
+  if (toolMarkupPrefixContainsDSML(prefix)) {
     return true;
   }
   if (/[="']/u.test(prefix)) {
@@ -848,6 +855,13 @@ function toolMarkupPrefixAllowsLocalName(prefix) {
   }
   const previous = normalizeFullwidthASCIIChar(prefix[prefix.length - 1] || '');
   return !/^[A-Za-z0-9]$/.test(previous);
+}
+
+function toolMarkupPrefixContainsDSML(prefix) {
+  if (!prefix) {
+    return false;
+  }
+  return normalizedASCIITailAt(prefix, 0).includes('dsml');
 }
 
 function toolMarkupPrefixAllowsLocalNameAt(raw, start, localStart) {
@@ -975,6 +989,9 @@ function consumeToolMarkupPrefixSegment(raw, idx) {
 
 function hasToolMarkupNamePrefix(raw, start) {
   for (const name of TOOL_MARKUP_NAMES) {
+    if (name.noPrefixValidate) {
+      continue;
+    }
     if (consumeToolKeyword(raw, start, name.raw).ok) {
       return true;
     }

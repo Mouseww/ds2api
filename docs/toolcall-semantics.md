@@ -40,7 +40,7 @@
 
 - 如果模型漏掉 opening wrapper，但后面仍输出了一个或多个 invoke 并以 closing wrapper 收尾，Go 解析链路会在解析前补回缺失的 opening wrapper。
 - 在进入现有 DSML rewrite / XML parse 之前，Go / Node 都会先做一次非常窄的 candidate-span canonicalization：只处理已经被 scanner 识别为工具标签壳的 wrapper / `invoke` / `parameter` / `name` / `CDATA` / `DSML` 及其结构分隔符；这里会移除零宽 / BOM / 控制类干扰字符，并把 `<`、`>`、`/`、`|`、`=`、引号、Unicode 空白、常见 dash / underscore 变体这类工具语法外壳符号折回 ASCII 语义。
-- Go / Node 解析层不再枚举每一种 DSML typo。它以固定本地标签名 `tool_calls` / `invoke` / `parameter` 为准，把标签名前的任意协议前缀壳视为可容忍噪声，并继续兼容半角管道符、全角感叹号 `！`、顿号 `、`、空白、重复 leading `<`、可视控制符 `␂`、原始 STX `\x02`、非 ASCII 分隔符、CJK 尖括号 `〈` / `〉`、弯引号属性值、PascalCase 本地名等漂移。例如 `<DSML|tool_calls>`、`<<|DSML|tool_calls>`、`<|DSML tool_calls>`、`<DSMLtool_calls>`、`<DSmartToolCalls>`、`<<DSML|DSML|tool_calls>`、`<DSML␂tool_calls>`、`<proto💥tool_calls>`、`<DSM|tool_calls>...〈/DSM|tool_calls〉`、`<！DSML！tool_calls>...<！/DSML！tool_calls>`、`<、DSML、tool_calls>...<、/DSML、tool_calls>` 都会归一化；相似但非固定标签名（如 `tool_calls_extra` / `ToolCallsExtra`）仍按普通文本处理。
+- Go / Node 解析层不再枚举每一种 DSML typo。它以固定本地标签名 `tool_calls` / `invoke` / `parameter` 为准，把标签名前的任意协议前缀壳视为可容忍噪声，并继续兼容半角管道符、全角感叹号 `！`、顿号 `、`、空白、重复 leading `<`、可视控制符 `␂`、原始 STX `\x02`、非 ASCII 分隔符、CJK 尖括号 `〈` / `〉`、弯引号属性值、PascalCase 本地名等漂移。例如 `<DSML|tool_calls>`、`<<|DSML|tool_calls>`、`<|DSML tool_calls>`、`<DSMLtool_calls>`、`<DSmartToolCalls>`、`<<DSML|DSML|tool_calls>`、`<DSML␂tool_calls>`、`<proto💥tool_calls>`、`<DSM|tool_calls>...〈/DSM|tool_calls〉`、`<！DSML！tool_calls>...<！/DSML！tool_calls>`、`<、DSML、tool_calls>...<、/DSML、tool_calls>` 都会归一化；相似但非固定标签名（如 `tool_calls_extra` / `ToolCallsExtra`）仍按普通文本处理。DSML 语境下还接受 `tool_calls` 的 `calls` 简写与重复分隔符漂移（如 `<｜｜DSML｜｜ calls>` / `<｜DSML｜｜ invoke>`，含 `string="true|false"` 这类多余参数属性），但 `calls` 作为通用词只在标签前缀里存在 DSML 证据时才识别为 `tool_calls`：裸 `<tool-calls>` 与正文中的 `<calls` 仍按普通文本处理。
 - 这个 candidate-span canonicalization 不会对普通 prose、参数正文、CDATA 内容或嵌套的非工具 XML 做广义 Unicode 归一化。也就是说，参数里的示例 `<invοke>`、普通聊天文本里的 confusable 单词、或其他非工具壳 XML 片段都保持原样；只有真正落在工具标签壳上的 whitelist 关键字和结构符号会被折叠。
 - 如果模型在固定工具标签名后多输出一个非结构性分隔符，例如 `<|DSML|tool_calls|` / `<|DSML|invoke|` / `<|DSML|parameter|` / `<DSMLtool_calls※>`，或在带属性标签的结束符前多输出一个尾部分隔符（如 `<DSM|parameter name="command"|>`），兼容层会把这个尾部分隔符当作异常标签终止符并补齐或归一化；如果后面已经有 `>` / `〉`，也会消费这个多余分隔符后再归一化。结构性字符如 `<` / `>` / `/` / `=` / 引号、空白和 ASCII 字母数字不会被当作这类分隔符。
 - “缺失 opening wrapper”的修复只会在 wrapper-confidence 足够高时触发：scanner 必须已经识别出白名单工具壳结构（wrapper / invoke / parameter / `name=` 等），且剩余失败看起来只是壳层结构问题。相似但不在白名单内的 near-miss 标签名，或缺少足够 wrapper 证据的 malformed 片段，仍会按普通文本透传。
@@ -57,7 +57,7 @@
 
 在流式链路中（Go / Node 一致）：
 
-- DSML `<|DSML|tool_calls>` wrapper、短横线形式（如 `<dsml-tool-calls>` / `<dsml-invoke>` / `<dsml-parameter>`）、基于固定本地标签名的 DSML 噪声容错形态、尾部非结构性分隔符形态（如 `<|DSML|tool_calls|` / `<DSMLtool_calls※>`）和 canonical `<tool_calls>` wrapper 都会进入结构化捕获
+- DSML `<|DSML|tool_calls>` wrapper、短横线形式（如 `<dsml-tool-calls>` / `<dsml-invoke>` / `<dsml-parameter>`）、基于固定本地标签名的 DSML 噪声容错形态（含 DSML 语境下的 `calls` 简写与重复分隔符，如 `<｜｜DSML｜｜ calls>`）、尾部非结构性分隔符形态（如 `<|DSML|tool_calls|` / `<DSMLtool_calls※>`）和 canonical `<tool_calls>` wrapper 都会进入结构化捕获
 - 如果流里直接从 invoke 开始，但后面补上了 closing wrapper，Go 流式筛分也会按缺失 opening wrapper 的修复路径尝试恢复
 - 已识别成功的工具调用不会再次回流到普通文本
 - 不符合新格式的块不会执行，并继续按原样文本透传

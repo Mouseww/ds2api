@@ -7,15 +7,17 @@ import (
 )
 
 type toolMarkupNameAlias struct {
-	raw       string
-	canonical string
-	dsmlOnly  bool
+	raw              string
+	canonical        string
+	dsmlOnly         bool
+	noPrefixValidate bool
 }
 
 var toolMarkupNames = []toolMarkupNameAlias{
 	{raw: "tool_calls", canonical: "tool_calls"},
 	{raw: "tool-calls", canonical: "tool_calls", dsmlOnly: true},
 	{raw: "toolcalls", canonical: "tool_calls", dsmlOnly: true},
+	{raw: "calls", canonical: "tool_calls", dsmlOnly: true, noPrefixValidate: true},
 	{raw: "invoke", canonical: "invoke"},
 	{raw: "parameter", canonical: "parameter"},
 }
@@ -352,6 +354,9 @@ func hasASCIIPartialPrefixFoldAt(text string, start int, prefix string) bool {
 
 func hasToolMarkupNamePrefix(text string, start int) bool {
 	for _, name := range toolMarkupNames {
+		if name.noPrefixValidate {
+			continue
+		}
 		if hasASCIIPrefixFoldAt(text, start, name.raw) {
 			return true
 		}
@@ -385,6 +390,12 @@ func matchToolMarkupNameAfterArbitraryPrefix(text string, start int) (string, in
 				continue
 			}
 			if !toolMarkupPrefixAllowsLocalNameAt(text, start, idx) {
+				continue
+			}
+			// Generic names (e.g. "calls") are too common to accept after an
+			// arbitrary prefix like "tool-": require explicit DSML evidence in
+			// the prefix so bare lookalikes stay plain text.
+			if name.noPrefixValidate && !toolMarkupPrefixContainsDSML(text[start:idx]) {
 				continue
 			}
 			return name.canonical, idx, next - idx, true
@@ -445,7 +456,7 @@ func toolMarkupPrefixAllowsLocalName(prefix string) bool {
 	if prefix == "" {
 		return false
 	}
-	if strings.Contains(normalizedASCIILowerString(prefix), "dsml") {
+	if toolMarkupPrefixContainsDSML(prefix) {
 		return true
 	}
 	if strings.ContainsAny(prefix, "=\"'") {
@@ -454,6 +465,10 @@ func toolMarkupPrefixAllowsLocalName(prefix string) bool {
 	r, _ := utf8.DecodeLastRuneInString(prefix)
 	r = normalizeFullwidthASCII(r)
 	return (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9')
+}
+
+func toolMarkupPrefixContainsDSML(prefix string) bool {
+	return strings.Contains(normalizedASCIILowerString(prefix), "dsml")
 }
 
 func normalizedASCIILowerString(text string) string {
