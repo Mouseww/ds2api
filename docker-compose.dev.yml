@@ -5,7 +5,11 @@
 #   - 自动重启
 #
 # 使用说明：
-#   docker-compose -f docker-compose.dev.yml up
+#   docker-compose -f docker-compose.dev.yml up -d --build
+#
+# 前端界面在镜像构建阶段（Dockerfile 的 dev 阶段）编译，容器内通过
+# DS2API_STATIC_ADMIN_DIR 指向镜像里的构建产物。因为 ./:/app 绑定挂载会
+# 遮挡 /app/static/admin，所以前端改动需要重新构建镜像才会生效。
 
 services:
   ds2api:
@@ -23,6 +27,11 @@ services:
     environment:
       - HOST=0.0.0.0
       - LOG_LEVEL=DEBUG
+      # Serve the admin UI built during `docker compose build` (see the Dockerfile
+      # `dev` stage). The ./:/app bind mount hides /app/static/admin, so without
+      # this the container would fall back to whatever stale build sits on the host.
+      # Rebuild the UI with: docker compose -f docker-compose.dev.yml up -d --build
+      - DS2API_STATIC_ADMIN_DIR=/opt/ds2api-static/admin
     volumes:
       # 源代码挂载（开发时实时生效）
       - ./:/app

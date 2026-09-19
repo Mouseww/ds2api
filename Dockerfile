@@ -23,13 +23,17 @@ RUN set -eux; \
     CGO_ENABLED=0 GOOS="${GOOS}" GOARCH="${GOARCH}" go build -buildvcs=false -ldflags="-s -w -X ds2api/internal/version.BuildVersion=${BUILD_VERSION_RESOLVED}" -o /out/ds2api ./cmd/ds2api
 
 FROM golang:1.26 AS dev
-# Node.js for webui auto-build on startup (used by docker-compose.dev.yml)
+# Node.js stays installed so the UI can also be rebuilt on demand in-container.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends nodejs npm \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY go.mod go.sum* ./
 RUN go mod download
+# Build the admin UI into the image. docker-compose.dev.yml bind-mounts the repo
+# over /app, which would hide anything baked into /app/static/admin, so the build
+# is staged outside the mount and selected via DS2API_STATIC_ADMIN_DIR.
+COPY --from=webui-builder /app/static/admin /opt/ds2api-static/admin
 
 FROM busybox:1.36.1-musl AS busybox-tools
 
