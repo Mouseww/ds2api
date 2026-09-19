@@ -68,6 +68,9 @@ export default function RuntimeSection({ t, form, setForm }) {
                             ...prev,
                             runtime: { ...prev.runtime, token_refresh_interval_hours: Number(e.target.value || 1) },
                         }))}
+                        className="w-full bg-background border border-border rounded-lg px-3 py-2"
+                    />
+                </label>
                 <label className="text-sm space-y-2">
                     <span className="text-muted-foreground">{t('settings.dailyTokenLimitM')}</span>
                     <input
