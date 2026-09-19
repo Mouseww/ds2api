@@ -134,6 +134,7 @@ flowchart LR
 | Admin API | 配置管理、运行时设置热更新、代理管理、账号测试 / 批量测试、会话清理、导入导出、Vercel 同步、版本检查 |
 | WebUI 管理台 | `/admin` 单页应用（中英文双语、深色模式，支持查看服务器端对话记录）；`/admin` 默认落地页为 Dashboard 用量仪表盘（此前为 Accounts），显式路由如 `/admin/accounts` 不受影响 |
 | 管理后台 Dashboard | 可视化 Token 用量、请求次数、错误数、延迟，以及实时 RPM/TPM 与历史趋势图（`1h`/`24h`/`7d`/`30d`/`90d`/`1y`，数据来自 `GET /admin/usage-stats`） |
+| 账号用量监测 | Dashboard 新增「账号用量」视图：按账号维度统计所选区间的请求次数、成功率、Token 用量、流式请求与平均 RPM/TPM，支持排行榜与单账号趋势下钻（`GET /admin/usage-stats/accounts`、`GET /admin/usage-stats/accounts/{identifier}`）；在获取到账号前即失败的请求单独提示，不摊派给真实账号 |
 | 运维探针 | `GET /healthz`（存活）、`GET /readyz`（就绪） |
 
 OpenAI `/v1/*` 仍是推荐的规范路径；同时支持 `/models`、`/chat/completions`、`/responses`、`/embeddings`、`/files`、`/files/{file_id}` 等根路径快捷路由，方便只配置 DS2API 根地址的第三方客户端。

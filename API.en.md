@@ -174,6 +174,8 @@ Gemini-compatible clients can also send `x-goog-api-key`, `?key=`, or `?api_key=
 | PUT | `/admin/chat-history/settings` | Admin | Update conversation history retention limit |
 | GET | `/admin/usage-stats` | Admin | Read the usage snapshot (tokens / requests / RPM / TPM) |
 | DELETE | `/admin/usage-stats` | Admin | Reset all usage statistics |
+| GET | `/admin/usage-stats/accounts` | Admin | Read the per-account usage ranking for one range |
+| GET | `/admin/usage-stats/accounts/{identifier}` | Admin | Read one account's trend and detail |
 | GET | `/admin/version` | Admin | Check current version and latest Release |
 
 OpenAI `/v1/*` paths are canonical. For clients configured with the bare DS2API service URL, the same OpenAI handlers are also exposed through root shortcuts: `/models`, `/models/{id}`, `/chat/completions`, `/responses`, `/responses/{response_id}`, `/embeddings`, `/files`, and `/files/{file_id}`.
@@ -1237,7 +1239,7 @@ The response always carries `Cache-Control: no-store`, because the counters chan
 | `requests` | number | Total number of requests |
 | `errors` | number | Number of non-2xx requests |
 | `success_requests` | number | Number of successful requests |
-| `success_rate` | number | Success rate (percentage) |
+| `success_rate` | number | Success rate as a `0..1` fraction |
 | `prompt_tokens` / `completion_tokens` / `reasoning_tokens` / `total_tokens` | number | Token totals |
 | `avg_elapsed_ms` / `max_elapsed_ms` | number | Average / maximum elapsed time |
 | `rpm` / `tpm` | number | Requests / tokens per minute extrapolated from the last 60 seconds |
@@ -1252,16 +1254,85 @@ The response always carries `Cache-Control: no-store`, because the counters chan
 - Token counts are filled in by the protocol adapters when they finalize the response (streaming and non-streaming alike), so token accounting still works even when **response recording is disabled** (`chat_history` retention set to 0).
 - Internal subrequests of the Vercel Node runtime (`__stream_prepare` / `__stream_release` / `__stream_pow` / `__stream_switch`) and the admin dashboard's own traffic are **not counted**.
 - `models` / `surfaces` / `accounts` / `callers` are **cumulative dimensions** and do not follow `range`; each dimension keeps at most 100 keys, keys beyond that are folded into `(other)`, and empty identities are folded into `(none)`.
+- `success_rate` is a `0..1` fraction, not a `0..100` percentage; the dashboard renders it as a percentage.
+- The per-account time series is written by the same middleware when each request finishes and backs `GET /admin/usage-stats/accounts`: at most 128 accounts are kept (the rest fold into `(other)`), and each account retains minute buckets for 30 hours, hour buckets for 32 days and day buckets for 400 days. The account view therefore reads minute buckets for `1h` / `24h`, hour buckets for `7d` / `30d` and day buckets for `90d` / `1y`; older fine-grained buckets are reclaimed, but that account's cumulative `totals` are unaffected.
+- Requests that failed before an account was acquired only enter the global statistics and never the per-account series, so they are never blamed on a real account (see "Attribution rules" under the account endpoints below).
 - Time buckets are aligned to epoch multiples (UTC); the dashboard renders them in the browser's local time zone.
 - `peak_rpm` / `peak_tpm` are taken from the retained minute buckets (48 hours), so when `range` is longer than 48 hours they describe the peak inside the retention window.
 - Data is persisted to `data/usage_stats.json` by default (override with `DS2API_USAGE_STATS_PATH`); with no configured path it is kept in memory only and resets on restart. On Vercel, when `DS2API_USAGE_STATS_PATH` is not set, the path is `/tmp/usage_stats.json`.
 
 ### `DELETE /admin/usage-stats`
 
-Clears all cumulative statistics and time buckets, and resets the tracking start time to the current time. Admin authentication is required.
+Clears all cumulative statistics and time buckets (including the per-account series) and resets the tracking start time to the current time. Admin authentication is required.
 
 ```json
 { "success": true }
+```
+
+### `GET /admin/usage-stats/accounts`
+
+Reads the per-account usage ranking for one range; this backs the admin dashboard's "Account usage" view. Admin authentication is required. The response always carries `Cache-Control: no-store`.
+
+**Query parameters**
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `range` | string | No | Range: `1h`, `24h`, `7d`, `30d`, `90d`, `1y`. Defaults to `24h`; invalid values fall back to `24h` |
+
+**Response fields**
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `generated_at` | number | Snapshot creation time (epoch milliseconds) |
+| `range` / `bucket` / `bucket_ms` | string / string / number | The range that took effect and its render granularity |
+| `summary` | object | Aggregate for **all** traffic in the range (same structure as `GET /admin/usage-stats`'s `summary`) |
+| `attributed` | object | Aggregate for traffic that was **actually attributed to an account** (same structure) |
+| `accounts` | array | Ranked accounts, elements below; ordered by `total_tokens`, then `requests` descending, then account id ascending |
+| `tracking_since` | number | Tracking start time (epoch milliseconds) |
+
+`accounts` element fields (same structure as the detail payload's `account`):
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `account_id` | string | Account identifier (email or mobile number) |
+| `requests` / `errors` | number | Requests and errors (errors are non-2xx responses) |
+| `success_requests` | number | Successful requests (`requests - errors`, floored at 0) |
+| `success_rate` | number | Success rate as a `0..1` fraction (the dashboard renders it as a percentage) |
+| `stream_requests` | number | Number of streaming requests |
+| `prompt_tokens` / `completion_tokens` / `reasoning_tokens` / `total_tokens` | number | Token totals |
+| `avg_elapsed_ms` / `max_elapsed_ms` | number | Average / maximum elapsed time in milliseconds |
+| `avg_rpm` / `avg_tpm` | number | Average requests / tokens per minute across the range |
+| `first_seen_at` / `last_seen_at` | number | First / last activity for this account (epoch milliseconds) |
+
+**Attribution rules**
+
+- Only accounts that actually served traffic inside the range are listed (accounts whose range aggregate is `requests = 0` are skipped).
+- Requests that failed before an account was acquired (missing credentials, no pooled capacity) are never blamed on a real account, so the request-count difference between `summary` and `attributed` is exactly the **unattributed traffic**, which the dashboard surfaces in its own notice.
+- Events with an empty account identity only enter the global statistics and never the per-account series; accounts beyond the 128-account cap fold into `(other)`.
+
+### `GET /admin/usage-stats/accounts/{identifier}`
+
+Reads one account's trend and detail for the selected range. Admin authentication is required. The account identifier is a path segment, so it must be URL-encoded (e.g. `user%40example.com`). The response always carries `Cache-Control: no-store`.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `identifier` | string | Yes | Account identifier (path parameter; URL-encoding supported) |
+| `range` | string | No | Same values as above; defaults to `24h` |
+
+**Response fields**
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `generated_at` / `range` / `bucket` / `bucket_ms` | number / string / string / number | Snapshot time and the render granularity that took effect |
+| `account` | object | This account's statistics for the selected range (same structure as an `accounts` element) |
+| `totals` | object | This account's cumulative statistics (independent of `range`; `avg_rpm` / `avg_tpm` are left as `0`) |
+| `series` | array | This account's range series; each element is `{t, requests, errors, prompt_tokens, completion_tokens, reasoning_tokens, total_tokens}` |
+| `models` / `surfaces` | array | This account's cumulative model / surface mix; each element is `{key, requests, errors, prompt_tokens, completion_tokens, reasoning_tokens, total_tokens}` |
+
+Returns `404` when the account has no usage inside the retained window:
+
+```json
+{ "detail": "no usage recorded for this account in the retained window" }
 ```
 
 ### `GET /admin/version`

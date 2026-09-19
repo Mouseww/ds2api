@@ -33,6 +33,11 @@ type Store struct {
 	accounts map[string]*bucket
 	callers  map[string]*bucket
 
+	// accountSeries backs the per-account usage monitoring surface: cumulative
+	// totals plus the time buckets needed to render any dashboard range for a
+	// single account.
+	accountSeries map[string]*accountSeries
+
 	seconds map[int64]*bucket
 	minutes map[int64]*bucket
 	hours   map[int64]*bucket
@@ -48,18 +53,19 @@ type Store struct {
 
 // snapshotFile is the on-disk representation of the store.
 type snapshotFile struct {
-	Version       int                `json:"version"`
-	SavedAt       int64              `json:"saved_at"`
-	TrackingSince int64              `json:"tracking_since"`
-	Totals        bucket             `json:"totals"`
-	Models        map[string]*bucket `json:"models"`
-	Surfaces      map[string]*bucket `json:"surfaces"`
-	Accounts      map[string]*bucket `json:"accounts"`
-	Callers       map[string]*bucket `json:"callers"`
-	Seconds       map[int64]*bucket  `json:"seconds"`
-	Minutes       map[int64]*bucket  `json:"minutes"`
-	Hours         map[int64]*bucket  `json:"hours"`
-	Days          map[int64]*bucket  `json:"days"`
+	Version       int                       `json:"version"`
+	SavedAt       int64                     `json:"saved_at"`
+	TrackingSince int64                     `json:"tracking_since"`
+	Totals        bucket                    `json:"totals"`
+	Models        map[string]*bucket        `json:"models"`
+	Surfaces      map[string]*bucket        `json:"surfaces"`
+	Accounts      map[string]*bucket        `json:"accounts"`
+	Callers       map[string]*bucket        `json:"callers"`
+	AccountSeries map[string]*accountSeries `json:"account_series,omitempty"`
+	Seconds       map[int64]*bucket         `json:"seconds"`
+	Minutes       map[int64]*bucket         `json:"minutes"`
+	Hours         map[int64]*bucket         `json:"hours"`
+	Days          map[int64]*bucket         `json:"days"`
 }
 
 // NewStore creates a usage store. An empty path keeps everything in memory and
@@ -74,6 +80,7 @@ func NewStore(path string) *Store {
 		surfaces:      map[string]*bucket{},
 		accounts:      map[string]*bucket{},
 		callers:       map[string]*bucket{},
+		accountSeries: map[string]*accountSeries{},
 		seconds:       map[int64]*bucket{},
 		minutes:       map[int64]*bucket{},
 		hours:         map[int64]*bucket{},
@@ -131,6 +138,7 @@ func (s *Store) Record(ev Event) {
 	bumpBreakdown(s.surfaces, ev.Surface, ev)
 	bumpBreakdown(s.accounts, ev.AccountID, ev)
 	bumpBreakdown(s.callers, ev.CallerID, ev)
+	s.recordAccountLocked(ev, now)
 
 	addBucket(s.seconds, now.Unix(), ev)
 	addBucket(s.minutes, now.Unix()/60, ev)
@@ -138,10 +146,7 @@ func (s *Store) Record(ev Event) {
 	addBucket(s.days, now.Unix()/86400, ev)
 
 	s.dirty = true
-	if s.lastPrune.IsZero() || now.Sub(s.lastPrune) >= time.Minute {
-		s.pruneLocked(now)
-		s.lastPrune = now
-	}
+	s.pruneIfDueLocked(now)
 }
 
 // Reset clears every counter and restarts the tracking window.
@@ -159,6 +164,7 @@ func (s *Store) Reset() error {
 	s.surfaces = map[string]*bucket{}
 	s.accounts = map[string]*bucket{}
 	s.callers = map[string]*bucket{}
+	s.accountSeries = map[string]*accountSeries{}
 	s.seconds = map[int64]*bucket{}
 	s.minutes = map[int64]*bucket{}
 	s.hours = map[int64]*bucket{}
@@ -247,6 +253,7 @@ func (s *Store) marshalLocked() ([]byte, error) {
 		Surfaces:      s.surfaces,
 		Accounts:      s.accounts,
 		Callers:       s.callers,
+		AccountSeries: s.accountSeries,
 		Seconds:       s.seconds,
 		Minutes:       s.minutes,
 		Hours:         s.hours,
@@ -281,6 +288,7 @@ func (s *Store) load() error {
 	s.surfaces = adoptBreakdowns(file.Surfaces)
 	s.accounts = adoptBreakdowns(file.Accounts)
 	s.callers = adoptBreakdowns(file.Callers)
+	s.accountSeries = adoptAccountSeries(file.AccountSeries)
 	s.seconds = adoptBuckets(file.Seconds)
 	s.minutes = adoptBuckets(file.Minutes)
 	s.hours = adoptBuckets(file.Hours)
@@ -301,6 +309,19 @@ func (s *Store) pruneLocked(now time.Time) {
 	pruneBucketMap(s.minutes, now.Add(-minuteRetention).Unix()/60)
 	pruneBucketMap(s.hours, now.Add(-hourRetention).Unix()/3600)
 	pruneBucketMap(s.days, now.Add(-dayRetention).Unix()/86400)
+	for _, series := range s.accountSeries {
+		series.prune(now)
+	}
+}
+
+// pruneIfDueLocked runs the retention sweep at most once per minute, so a hot
+// request path does not walk every bucket map on each call. Callers must hold
+// s.mu.
+func (s *Store) pruneIfDueLocked(now time.Time) {
+	if s.lastPrune.IsZero() || now.Sub(s.lastPrune) >= time.Minute {
+		s.pruneLocked(now)
+		s.lastPrune = now
+	}
 }
 
 // addBucket folds an event into the bucket keyed by key.

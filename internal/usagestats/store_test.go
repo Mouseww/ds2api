@@ -283,7 +283,8 @@ func TestAnnotateWithoutRecorderReportsFalse(t *testing.T) {
 	if Annotate(context.Background(), Usage{TotalTokens: 1}) {
 		t.Fatal("expected false when no recorder is attached")
 	}
-	if _, ok := RecorderFromContext(nil); ok {
+	var nilCtx context.Context
+	if _, ok := RecorderFromContext(nilCtx); ok {
 		t.Fatal("expected no recorder for a nil context")
 	}
 }

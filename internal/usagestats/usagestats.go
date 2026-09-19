@@ -102,6 +102,7 @@ type Usage struct {
 type bucket struct {
 	Requests   int64 `json:"requests"`
 	Errors     int64 `json:"errors"`
+	Streams    int64 `json:"streams"`
 	Prompt     int64 `json:"prompt_tokens"`
 	Completion int64 `json:"completion_tokens"`
 	Reasoning  int64 `json:"reasoning_tokens"`
@@ -118,6 +119,9 @@ func (b *bucket) addEvent(ev Event) {
 	b.Requests++
 	if ev.Failed() {
 		b.Errors++
+	}
+	if ev.Stream {
+		b.Streams++
 	}
 	b.Prompt += int64(ev.PromptTokens)
 	b.Completion += int64(ev.CompletionTokens)
@@ -136,6 +140,7 @@ func (b *bucket) mergeInto(dst *bucket) {
 	}
 	dst.Requests += b.Requests
 	dst.Errors += b.Errors
+	dst.Streams += b.Streams
 	dst.Prompt += b.Prompt
 	dst.Completion += b.Completion
 	dst.Reasoning += b.Reasoning

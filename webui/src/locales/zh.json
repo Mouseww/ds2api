@@ -61,7 +61,27 @@
         "resetConfirm": "清空全部用量统计？",
         "resetConfirmAction": "确认清空",
         "resetCancel": "取消",
-        "resetFailed": "重置失败"
+        "resetFailed": "重置失败",
+        "accounts": {
+            "tab": "账号用量",
+            "overviewTab": "总览",
+            "rankTitle": "账号用量排行",
+            "rankDesc": "所选时间范围内每个账号的请求次数、Token 用量与成功率；点击任意一行查看该账号趋势",
+            "detailDesc": "{range} 内的账号明细",
+            "close": "关闭",
+            "accountId": "账号",
+            "successRate": "成功率",
+            "streams": "流式请求",
+            "avgRpm": "平均 RPM",
+            "avgTpm": "平均 TPM",
+            "lastSeen": "最近活跃",
+            "firstSeen": "首次活跃",
+            "totals": "该账号累计（全部时间）",
+            "attributed": "已归属请求",
+            "accounts": "账号数",
+            "attributionNote": "{range} 内有 {count} 次请求未归属到具体账号（在获取账号前即失败），未计入上方排行",
+            "empty": "所选时间范围内暂无账号用量"
+        }
     },
     "language": {
         "label": "语言",

@@ -7,6 +7,7 @@ import {
     Cpu,
     Database,
     Layers,
+    LayoutDashboard,
     Loader2,
     RotateCcw,
     Server,
@@ -16,6 +17,7 @@ import {
 
 import AreaLineChart from '../../components/charts/AreaLineChart'
 import { useI18n } from '../../i18n'
+import AccountUsageView from './AccountUsageView'
 import {
     BreakdownPanel,
     LivePanel,
@@ -38,11 +40,45 @@ import {
 
 const METRIC_OPTIONS = ['requests', 'tokens', 'errors']
 
+// The dashboard has two views over the same range selector: the overview
+// (aggregate KPIs plus the global trend) and the per-account ranking.
+const VIEW_OPTIONS = [
+    { id: 'overview', icon: LayoutDashboard, labelKey: 'dashboard.accounts.overviewTab' },
+    { id: 'accounts', icon: Users, labelKey: 'dashboard.accounts.tab' },
+]
+
+function ViewToggle({ value, onChange, t }) {
+    return (
+        <div className="inline-flex rounded-lg border border-border bg-secondary/50 p-0.5">
+            {VIEW_OPTIONS.map(option => {
+                const Icon = option.icon
+                return (
+                    <button
+                        key={option.id}
+                        type="button"
+                        onClick={() => onChange(option.id)}
+                        className={clsx(
+                            'inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors',
+                            value === option.id
+                                ? 'bg-primary text-primary-foreground shadow-sm'
+                                : 'text-muted-foreground hover:text-foreground'
+                        )}
+                    >
+                        <Icon className="h-3.5 w-3.5" />
+                        {t(option.labelKey)}
+                    </button>
+                )
+            })}
+        </div>
+    )
+}
+
 export default function DashboardContainer({ authFetch }) {
     const { t } = useI18n()
     const apiFetch = authFetch || fetch
     const [range, setRange] = useState(DEFAULT_RANGE)
     const [metric, setMetric] = useState('requests')
+    const [view, setView] = useState('overview')
     const [confirmReset, setConfirmReset] = useState(false)
     const [resetting, setResetting] = useState(false)
     const [resetError, setResetError] = useState('')
@@ -119,155 +155,172 @@ export default function DashboardContainer({ authFetch }) {
                     </h1>
                     <p className="mt-1 text-xs text-muted-foreground">{t('dashboard.desc')}</p>
                 </div>
-                <RangeSelector
-                    value={range}
-                    options={RANGE_OPTIONS}
-                    onChange={setRange}
-                    onRefresh={() => reload({ silent: true })}
-                    refreshing={refreshing}
-                    t={t}
-                />
+                <div className="flex flex-wrap items-center gap-2">
+                    <ViewToggle value={view} onChange={setView} t={t} />
+                    <RangeSelector
+                        value={range}
+                        options={RANGE_OPTIONS}
+                        onChange={setRange}
+                        onRefresh={() => reload({ silent: true })}
+                        refreshing={refreshing}
+                        t={t}
+                    />
+                </div>
             </div>
 
             <StatusBanner error={error} loading={loading && !data} t={t} />
 
-            <LivePanel live={data?.live} summary={summary} t={t} />
-
-            <section className="space-y-3">
-                <div className="flex items-center justify-between gap-3">
-                    <div>
-                        <h2 className="text-sm font-semibold text-foreground">{t('dashboard.kpiTitle')}</h2>
-                        <p className="mt-0.5 text-[11px] text-muted-foreground">{t('dashboard.kpiDesc')}</p>
-                    </div>
-                    <div className="flex items-center gap-2">
-                        <SuccessRateBadge summary={summary} t={t} />
-                        <span className="rounded-full border border-border bg-secondary/50 px-2.5 py-1 text-[10px] font-medium text-muted-foreground">
-                            {t(`dashboard.ranges.${range}`)}
-                        </span>
-                    </div>
-                </div>
-                <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-                    <StatCard
-                        icon={Server}
-                        label={t('dashboard.requests')}
-                        value={formatExact(summary?.requests)}
-                        hint={t('dashboard.successRateHint', { value: formatPercent(summary?.success_rate) })}
-                    />
-                    <StatCard
-                        icon={Cpu}
-                        label={t('dashboard.totalTokens')}
-                        value={formatCount(summary?.total_tokens)}
-                        hint={t('dashboard.exactHint', { value: formatExact(summary?.total_tokens) })}
-                        tone="primary"
-                    />
-                    <StatCard
-                        icon={Layers}
-                        label={t('dashboard.promptTokens')}
-                        value={formatCount(summary?.prompt_tokens)}
-                        hint={t('dashboard.exactHint', { value: formatExact(summary?.prompt_tokens) })}
-                    />
-                    <StatCard
-                        icon={Layers}
-                        label={t('dashboard.completionTokens')}
-                        value={formatCount(summary?.completion_tokens)}
-                        hint={t('dashboard.exactHint', { value: formatExact(summary?.completion_tokens) })}
-                    />
-                    <StatCard
-                        icon={Database}
-                        label={t('dashboard.reasoningTokens')}
-                        value={formatCount(summary?.reasoning_tokens)}
-                        hint={t('dashboard.exactHint', { value: formatExact(summary?.reasoning_tokens) })}
-                    />
-                    <StatCard
-                        icon={AlertTriangle}
-                        label={t('dashboard.errors')}
-                        value={formatExact(summary?.errors)}
-                        hint={t('dashboard.successRateHint', { value: formatPercent(summary?.success_rate) })}
-                        tone={Number(summary?.errors) > 0 ? 'danger' : 'success'}
-                    />
-                    <StatCard
-                        icon={Timer}
-                        label={t('dashboard.avgLatency')}
-                        value={formatLatency(summary?.avg_elapsed_ms)}
-                        hint={t('dashboard.latencyHint')}
-                    />
-                    <StatCard
-                        icon={Clock}
-                        label={t('dashboard.maxLatency')}
-                        value={formatLatency(summary?.max_elapsed_ms)}
-                        hint={t('dashboard.latencyHint')}
-                    />
-                </div>
-            </section>
-
-            <section className="rounded-2xl border border-border bg-card p-5 shadow-sm">
-                <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
-                    <div>
-                        <h2 className="text-sm font-semibold text-foreground">{t('dashboard.trendTitle')}</h2>
-                        <p className="mt-0.5 text-[11px] text-muted-foreground">{t('dashboard.trendDesc')}</p>
-                    </div>
-                    <MetricToggle value={metric} options={METRIC_OPTIONS} onChange={setMetric} t={t} />
-                </div>
-                <AreaLineChart
-                    series={chartSeries}
-                    labels={labels}
-                    formatValue={chartFormat}
-                    emptyLabel={t('dashboard.empty')}
+            {view === 'accounts' ? (
+                <AccountUsageView
+                    apiFetch={apiFetch}
+                    range={range}
+                    onRefresh={() => reload({ silent: true })}
+                    refreshing={refreshing}
+                    t={t}
                 />
-            </section>
+            ) : null}
 
-            <section className="space-y-3">
-                <div className="flex flex-wrap items-baseline justify-between gap-2">
-                    <div>
-                        <h2 className="text-sm font-semibold text-foreground">{t('dashboard.breakdownTitle')}</h2>
-                        <p className="mt-0.5 text-[11px] text-muted-foreground">{t('dashboard.breakdownDesc')}</p>
-                    </div>
-                    <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
-                        <span>
-                            {t('dashboard.allTimeRequests')}:{' '}
-                            <span className="font-medium tabular-nums text-foreground">{formatExact(totals?.requests)}</span>
-                        </span>
-                        <span>
-                            {t('dashboard.allTimeTokens')}:{' '}
-                            <span className="font-medium tabular-nums text-foreground">{formatCount(totals?.total_tokens)}</span>
-                        </span>
-                    </div>
-                </div>
-                <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-                    <BreakdownPanel
-                        title={t('dashboard.byModel')}
-                        items={data?.models}
-                        valueKey="total_tokens"
-                        formatValue={formatCount}
-                        t={t}
-                        icon={Cpu}
-                    />
-                    <BreakdownPanel
-                        title={t('dashboard.bySurface')}
-                        items={data?.surfaces}
-                        valueKey="requests"
-                        formatValue={formatExact}
-                        t={t}
-                        icon={Server}
-                    />
-                    <BreakdownPanel
-                        title={t('dashboard.byAccount')}
-                        items={data?.accounts}
-                        valueKey="total_tokens"
-                        formatValue={formatCount}
-                        t={t}
-                        icon={Users}
-                    />
-                    <BreakdownPanel
-                        title={t('dashboard.byCaller')}
-                        items={data?.callers}
-                        valueKey="requests"
-                        formatValue={formatExact}
-                        t={t}
-                        icon={Activity}
-                    />
-                </div>
-            </section>
+            {view === 'overview' ? (
+                <>
+                    <LivePanel live={data?.live} summary={summary} t={t} />
+
+                    <section className="space-y-3">
+                        <div className="flex items-center justify-between gap-3">
+                            <div>
+                                <h2 className="text-sm font-semibold text-foreground">{t('dashboard.kpiTitle')}</h2>
+                                <p className="mt-0.5 text-[11px] text-muted-foreground">{t('dashboard.kpiDesc')}</p>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <SuccessRateBadge summary={summary} t={t} />
+                                <span className="rounded-full border border-border bg-secondary/50 px-2.5 py-1 text-[10px] font-medium text-muted-foreground">
+                                    {t(`dashboard.ranges.${range}`)}
+                                </span>
+                            </div>
+                        </div>
+                        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                            <StatCard
+                                icon={Server}
+                                label={t('dashboard.requests')}
+                                value={formatExact(summary?.requests)}
+                                hint={t('dashboard.successRateHint', { value: formatPercent(summary?.success_rate) })}
+                            />
+                            <StatCard
+                                icon={Cpu}
+                                label={t('dashboard.totalTokens')}
+                                value={formatCount(summary?.total_tokens)}
+                                hint={t('dashboard.exactHint', { value: formatExact(summary?.total_tokens) })}
+                                tone="primary"
+                            />
+                            <StatCard
+                                icon={Layers}
+                                label={t('dashboard.promptTokens')}
+                                value={formatCount(summary?.prompt_tokens)}
+                                hint={t('dashboard.exactHint', { value: formatExact(summary?.prompt_tokens) })}
+                            />
+                            <StatCard
+                                icon={Layers}
+                                label={t('dashboard.completionTokens')}
+                                value={formatCount(summary?.completion_tokens)}
+                                hint={t('dashboard.exactHint', { value: formatExact(summary?.completion_tokens) })}
+                            />
+                            <StatCard
+                                icon={Database}
+                                label={t('dashboard.reasoningTokens')}
+                                value={formatCount(summary?.reasoning_tokens)}
+                                hint={t('dashboard.exactHint', { value: formatExact(summary?.reasoning_tokens) })}
+                            />
+                            <StatCard
+                                icon={AlertTriangle}
+                                label={t('dashboard.errors')}
+                                value={formatExact(summary?.errors)}
+                                hint={t('dashboard.successRateHint', { value: formatPercent(summary?.success_rate) })}
+                                tone={Number(summary?.errors) > 0 ? 'danger' : 'success'}
+                            />
+                            <StatCard
+                                icon={Timer}
+                                label={t('dashboard.avgLatency')}
+                                value={formatLatency(summary?.avg_elapsed_ms)}
+                                hint={t('dashboard.latencyHint')}
+                            />
+                            <StatCard
+                                icon={Clock}
+                                label={t('dashboard.maxLatency')}
+                                value={formatLatency(summary?.max_elapsed_ms)}
+                                hint={t('dashboard.latencyHint')}
+                            />
+                        </div>
+                    </section>
+
+                    <section className="rounded-2xl border border-border bg-card p-5 shadow-sm">
+                        <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+                            <div>
+                                <h2 className="text-sm font-semibold text-foreground">{t('dashboard.trendTitle')}</h2>
+                                <p className="mt-0.5 text-[11px] text-muted-foreground">{t('dashboard.trendDesc')}</p>
+                            </div>
+                            <MetricToggle value={metric} options={METRIC_OPTIONS} onChange={setMetric} t={t} />
+                        </div>
+                        <AreaLineChart
+                            series={chartSeries}
+                            labels={labels}
+                            formatValue={chartFormat}
+                            emptyLabel={t('dashboard.empty')}
+                        />
+                    </section>
+
+                    <section className="space-y-3">
+                        <div className="flex flex-wrap items-baseline justify-between gap-2">
+                            <div>
+                                <h2 className="text-sm font-semibold text-foreground">{t('dashboard.breakdownTitle')}</h2>
+                                <p className="mt-0.5 text-[11px] text-muted-foreground">{t('dashboard.breakdownDesc')}</p>
+                            </div>
+                            <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
+                                <span>
+                                    {t('dashboard.allTimeRequests')}:{' '}
+                                    <span className="font-medium tabular-nums text-foreground">{formatExact(totals?.requests)}</span>
+                                </span>
+                                <span>
+                                    {t('dashboard.allTimeTokens')}:{' '}
+                                    <span className="font-medium tabular-nums text-foreground">{formatCount(totals?.total_tokens)}</span>
+                                </span>
+                            </div>
+                        </div>
+                        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                            <BreakdownPanel
+                                title={t('dashboard.byModel')}
+                                items={data?.models}
+                                valueKey="total_tokens"
+                                formatValue={formatCount}
+                                t={t}
+                                icon={Cpu}
+                            />
+                            <BreakdownPanel
+                                title={t('dashboard.bySurface')}
+                                items={data?.surfaces}
+                                valueKey="requests"
+                                formatValue={formatExact}
+                                t={t}
+                                icon={Server}
+                            />
+                            <BreakdownPanel
+                                title={t('dashboard.byAccount')}
+                                items={data?.accounts}
+                                valueKey="total_tokens"
+                                formatValue={formatCount}
+                                t={t}
+                                icon={Users}
+                            />
+                            <BreakdownPanel
+                                title={t('dashboard.byCaller')}
+                                items={data?.callers}
+                                valueKey="requests"
+                                formatValue={formatExact}
+                                t={t}
+                                icon={Activity}
+                            />
+                        </div>
+                    </section>
+                </>
+            ) : null}
 
             <section className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-border bg-card p-5 shadow-sm">
                 <RetentionNote

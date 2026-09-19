@@ -61,7 +61,27 @@
         "resetConfirm": "Clear all usage statistics?",
         "resetConfirmAction": "Clear everything",
         "resetCancel": "Cancel",
-        "resetFailed": "Reset failed"
+        "resetFailed": "Reset failed",
+        "accounts": {
+            "tab": "Account usage",
+            "overviewTab": "Overview",
+            "rankTitle": "Per-account usage",
+            "rankDesc": "Requests, tokens and success rate per account in the selected range; click a row to inspect its trend",
+            "detailDesc": "Account detail for {range}",
+            "close": "Close",
+            "accountId": "Account",
+            "successRate": "Success rate",
+            "streams": "Stream requests",
+            "avgRpm": "Avg RPM",
+            "avgTpm": "Avg TPM",
+            "lastSeen": "Last seen",
+            "firstSeen": "First seen",
+            "totals": "All-time totals for this account",
+            "attributed": "Attributed requests",
+            "accounts": "Accounts",
+            "attributionNote": "{count} requests in {range} were not attributed to an account (they failed before an account was acquired) and are excluded from the ranking above",
+            "empty": "No account usage in the selected range"
+        }
     },
     "language": {
         "label": "Language",

@@ -76,10 +76,7 @@ func (s *Store) Query(rangeName string) Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.lastPrune.IsZero() || now.Sub(s.lastPrune) >= time.Minute {
-		s.pruneLocked(now)
-		s.lastPrune = now
-	}
+	s.pruneIfDueLocked(now)
 
 	from := now.Add(-spec.window)
 	source, sourceSeconds := s.sourceBucketsLocked(spec.source)
