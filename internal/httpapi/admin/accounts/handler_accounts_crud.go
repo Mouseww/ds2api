@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"ds2api/internal/config"
+	"ds2api/internal/usagestats"
 )
 
 func (h *Handler) listAccounts(w http.ResponseWriter, r *http.Request) {
@@ -55,25 +56,34 @@ func (h *Handler) listAccounts(w http.ResponseWriter, r *http.Request) {
 		end = total
 	}
 	items := make([]map[string]any, 0, end-start)
+	usageByAccount := map[string]usagestats.AccountUsage{}
+	if h.UsageStats != nil {
+		usageByAccount = h.UsageStats.AllAccountUsage()
+	}
 	for _, acc := range accounts[start:end] {
 		testStatus, _ := h.Store.AccountTestStatus(acc.Identifier())
 		token := strings.TrimSpace(acc.Token)
+		usage := usageByAccount[acc.Identifier()]
 		items = append(items, map[string]any{
-			"identifier":      acc.Identifier(),
-			"name":            acc.Name,
-			"remark":          acc.Remark,
-			"email":           acc.Email,
-			"mobile":          acc.Mobile,
-			"proxy_id":        acc.ProxyID,
-			"has_password":    acc.Password != "",
-			"has_token":       token != "",
-			"token_preview":   maskSecretPreview(token),
-			"test_status":     testStatus,
-			"enabled":         acc.IsEnabled(),
-			"disabled_reason": acc.DisabledReason,
-			"ban_is_muted":    acc.BanIsMuted,
-			"ban_mute_until":  acc.BanMuteUntil,
-			"ban_status":      acc.BanStatus,
+			"identifier":              acc.Identifier(),
+			"name":                    acc.Name,
+			"remark":                  acc.Remark,
+			"email":                   acc.Email,
+			"mobile":                  acc.Mobile,
+			"proxy_id":                acc.ProxyID,
+			"has_password":            acc.Password != "",
+			"has_token":               token != "",
+			"token_preview":           maskSecretPreview(token),
+			"test_status":             testStatus,
+			"enabled":                 acc.IsEnabled(),
+			"disabled_reason":         acc.DisabledReason,
+			"ban_is_muted":            acc.BanIsMuted,
+			"ban_mute_until":          acc.BanMuteUntil,
+			"ban_status":              acc.BanStatus,
+			"usage_requests":          usage.Requests,
+			"usage_prompt_tokens":     usage.PromptTokens,
+			"usage_completion_tokens": usage.CompletionTokens,
+			"usage_total_tokens":      usage.TotalTokens,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "page": page, "page_size": pageSize, "total_pages": totalPages})

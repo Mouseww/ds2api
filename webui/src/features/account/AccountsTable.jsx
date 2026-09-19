@@ -8,6 +8,14 @@ function formatUnbanTime(muteUntil) {
     return date.toLocaleString()
 }
 
+function formatTokens(n) {
+    if (!n) return '0'
+    if (n >= 1_000_000_000) return (n / 1_000_000_000).toFixed(2) + 'B'
+    if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M'
+    if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K'
+    return String(n)
+}
+
 export default function AccountsTable({
     t,
     accounts,
@@ -183,6 +191,12 @@ export default function AccountsTable({
                                                     {t('accountManager.sessionCount', { count: sessionCounts[id] })}
                                                 </span>
                                             )}
+                                            <span className="font-mono bg-violet-500/10 text-violet-500 px-1.5 py-0.5 rounded text-[10px]" title={t('accountManager.usageTokens', { tokens: formatTokens(acc.usage_total_tokens || 0) })}>
+                                                {t('accountManager.usageTokens', { tokens: formatTokens(acc.usage_total_tokens || 0) })}
+                                            </span>
+                                            <span className="font-mono bg-cyan-500/10 text-cyan-500 px-1.5 py-0.5 rounded text-[10px]">
+                                                {t('accountManager.usageRequests', { count: acc.usage_requests || 0 })}
+                                            </span>
                                             {sessionCounts && sessionCounts[id] !== undefined && sessionCounts[id] > 0 && (
                                                 <button
                                                     onClick={() => onDeleteAllSessions(id)}

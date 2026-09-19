@@ -259,7 +259,9 @@
         "bannedCount": "封禁",
         "disabledCount": "禁用",
         "activePoolSizeLabel": "负载池目标账号数",
-        "activePoolSizeUnlimited": "不限制"
+        "activePoolSizeUnlimited": "不限制",
+        "usageTokens": "{tokens} Token",
+        "usageRequests": "{count} 次调用"
     },
     "proxyManager": {
         "title": "代理 IP",

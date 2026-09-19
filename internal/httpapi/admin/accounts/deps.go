@@ -6,6 +6,7 @@ import (
 	"ds2api/internal/chathistory"
 	"ds2api/internal/config"
 	adminshared "ds2api/internal/httpapi/admin/shared"
+	"ds2api/internal/usagestats"
 )
 
 type Handler struct {
@@ -14,6 +15,7 @@ type Handler struct {
 	DS          adminshared.DeepSeekCaller
 	OpenAI      adminshared.OpenAIChatCaller
 	ChatHistory *chathistory.Store
+	UsageStats  *usagestats.Store
 }
 
 var writeJSON = adminshared.WriteJSON

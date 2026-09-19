@@ -288,6 +288,37 @@ func (s *Store) peakLocked(now time.Time) (int64, int64) {
 	return peakRPM, peakTPM
 }
 
+// AccountUsage is the all-time usage accumulated for a single account.
+type AccountUsage struct {
+	Requests         int64 `json:"requests"`
+	PromptTokens     int64 `json:"prompt_tokens"`
+	CompletionTokens int64 `json:"completion_tokens"`
+	TotalTokens      int64 `json:"total_tokens"`
+}
+
+// AllAccountUsage returns all-time usage for every tracked account in one lock
+// acquisition, so the admin account list can annotate each row cheaply.
+func (s *Store) AllAccountUsage() map[string]AccountUsage {
+	out := map[string]AccountUsage{}
+	if s == nil {
+		return out
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, b := range s.accounts {
+		if b == nil {
+			continue
+		}
+		out[id] = AccountUsage{
+			Requests:         b.Requests,
+			PromptTokens:     b.Prompt,
+			CompletionTokens: b.Completion,
+			TotalTokens:      b.Total,
+		}
+	}
+	return out
+}
+
 // rankedBreakdowns flattens a breakdown map, busiest first.
 func rankedBreakdowns(m map[string]*bucket) []Breakdown {
 	out := make([]Breakdown, 0, len(m))

@@ -259,7 +259,9 @@
         "bannedCount": "Banned",
         "disabledCount": "Disabled",
         "activePoolSizeLabel": "Active pool size",
-        "activePoolSizeUnlimited": "Unlimited"
+        "activePoolSizeUnlimited": "Unlimited",
+        "usageTokens": "{tokens} tokens",
+        "usageRequests": "{count} calls"
     },
     "proxyManager": {
         "title": "Proxy IPs",
