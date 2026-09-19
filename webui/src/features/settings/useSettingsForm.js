@@ -12,7 +12,7 @@ const MAX_AUTO_FETCH_FAILURES = 3
 
 const DEFAULT_FORM = {
     admin: { jwt_expire_hours: 24 },
-    runtime: { account_max_inflight: 2, account_max_queue: 10, global_max_inflight: 10, token_refresh_interval_hours: 6, active_pool_size: 0 },
+    runtime: { account_max_inflight: 2, account_max_queue: 10, global_max_inflight: 10, token_refresh_interval_hours: 6, active_pool_size: 0, daily_token_limit_m: 0, daily_request_limit: 0 },
     responses: { store_ttl_seconds: 900 },
     embeddings: { provider: '' },
     auto_delete: { mode: 'none' },
@@ -59,6 +59,8 @@ function fromServerForm(data) {
             global_max_inflight: Number(data.runtime?.global_max_inflight || 10),
             token_refresh_interval_hours: Number(data.runtime?.token_refresh_interval_hours || 6),
             active_pool_size: Number(data.runtime?.active_pool_size ?? 0),
+            daily_token_limit_m: Number(data.runtime?.daily_token_limit_m ?? 0),
+            daily_request_limit: Number(data.runtime?.daily_request_limit ?? 0),
         },
         responses: {
             store_ttl_seconds: Number(data.responses?.store_ttl_seconds || 900),
@@ -92,6 +94,8 @@ function toServerPayload(form) {
             global_max_inflight: Number(form.runtime.global_max_inflight),
             token_refresh_interval_hours: Number(form.runtime.token_refresh_interval_hours),
             active_pool_size: Number(form.runtime.active_pool_size || 0),
+            daily_token_limit_m: Number(form.runtime.daily_token_limit_m || 0),
+            daily_request_limit: Number(form.runtime.daily_request_limit || 0),
         },
         responses: { store_ttl_seconds: Number(form.responses.store_ttl_seconds) },
         embeddings: { provider: String(form.embeddings.provider || '').trim() },

@@ -25,7 +25,8 @@ func (h *Handler) listAccounts(w http.ResponseWriter, r *http.Request) {
 	if pageSize > 5000 {
 		pageSize = 5000
 	}
-	accounts := h.Store.Snapshot().Accounts
+	snap := h.Store.Snapshot()
+	accounts := snap.Accounts
 	reverseAccounts(accounts)
 	q := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("q")))
 	if q != "" {
@@ -57,13 +58,20 @@ func (h *Handler) listAccounts(w http.ResponseWriter, r *http.Request) {
 	}
 	items := make([]map[string]any, 0, end-start)
 	usageByAccount := map[string]usagestats.AccountUsage{}
+	dailyByAccount := map[string]usagestats.AccountUsage{}
 	if h.UsageStats != nil {
 		usageByAccount = h.UsageStats.AllAccountUsage()
+		dailyByAccount = h.UsageStats.AccountDailyUsage()
 	}
+	// The global per-account daily quota is enforced by the pool; the list only
+	// reports it so an operator can see which accounts are near their budget.
+	tokenLimit := snap.Runtime.DailyTokenLimit()
+	requestLimit := int64(snap.Runtime.DailyRequestLimit)
 	for _, acc := range accounts[start:end] {
 		testStatus, _ := h.Store.AccountTestStatus(acc.Identifier())
 		token := strings.TrimSpace(acc.Token)
 		usage := usageByAccount[acc.Identifier()]
+		today := dailyByAccount[acc.Identifier()]
 		items = append(items, map[string]any{
 			"identifier":              acc.Identifier(),
 			"name":                    acc.Name,
@@ -84,6 +92,11 @@ func (h *Handler) listAccounts(w http.ResponseWriter, r *http.Request) {
 			"usage_prompt_tokens":     usage.PromptTokens,
 			"usage_completion_tokens": usage.CompletionTokens,
 			"usage_total_tokens":      usage.TotalTokens,
+			"usage_today_requests":    today.Requests,
+			"usage_today_tokens":      today.TotalTokens,
+			"daily_token_limit":       tokenLimit,
+			"daily_request_limit":     requestLimit,
+			"daily_limited":           dailyLimitReached(today, tokenLimit, requestLimit),
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "page": page, "page_size": pageSize, "total_pages": totalPages})
@@ -215,4 +228,16 @@ func fieldBool(m map[string]any, key string) (bool, bool) {
 	default:
 		return false, false
 	}
+}
+
+// dailyLimitReached reports whether today's usage has hit either configured
+// per-account daily budget. A zero limit disables that metric.
+func dailyLimitReached(today usagestats.AccountUsage, tokenLimit, requestLimit int64) bool {
+	if tokenLimit > 0 && today.TotalTokens >= tokenLimit {
+		return true
+	}
+	if requestLimit > 0 && today.Requests >= requestLimit {
+		return true
+	}
+	return false
 }

@@ -33,6 +33,8 @@ func (h *Handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 	thinkingInjectionEnabledSet := hasNestedSettingsKey(req, "thinking_injection", "enabled")
 	thinkingInjectionPromptSet := hasNestedSettingsKey(req, "thinking_injection", "prompt")
 	activePoolSizeSet := hasNestedSettingsKey(req, "runtime", "active_pool_size")
+	dailyTokenLimitSet := hasNestedSettingsKey(req, "runtime", "daily_token_limit_m")
+	dailyRequestLimitSet := hasNestedSettingsKey(req, "runtime", "daily_request_limit")
 
 	if err := h.Store.Update(func(c *config.Config) error {
 		if adminCfg != nil {
@@ -55,6 +57,14 @@ func (h *Handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 			}
 			if activePoolSizeSet {
 				c.Runtime.ActivePoolSize = runtimeCfg.ActivePoolSize
+			}
+			// The daily quotas are explicitly resettable to 0 (metric off), so
+			// presence of the key — not a positive value — drives the write.
+			if dailyTokenLimitSet {
+				c.Runtime.DailyTokenLimitM = runtimeCfg.DailyTokenLimitM
+			}
+			if dailyRequestLimitSet {
+				c.Runtime.DailyRequestLimit = runtimeCfg.DailyRequestLimit
 			}
 		}
 		if responsesCfg != nil && responsesCfg.StoreTTLSeconds > 0 {

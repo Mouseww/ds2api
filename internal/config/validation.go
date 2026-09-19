@@ -105,6 +105,13 @@ func ValidateRuntimeConfig(runtime RuntimeConfig) error {
 	if runtime.ActivePoolSize < 0 {
 		return fmt.Errorf("runtime.active_pool_size must be >= 0")
 	}
+	// 0 disables the corresponding daily metric, so it is always allowed.
+	if err := ValidateIntRange("runtime.daily_token_limit_m", runtime.DailyTokenLimitM, 1, 100_000_000, false); err != nil {
+		return err
+	}
+	if err := ValidateIntRange("runtime.daily_request_limit", runtime.DailyRequestLimit, 1, 1_000_000_000, false); err != nil {
+		return err
+	}
 	return nil
 }
 

@@ -150,6 +150,34 @@ func (s *Store) RuntimeActivePoolSize() int {
 	return 0
 }
 
+// RuntimeDailyTokenLimitM reports the per-account daily token budget in
+// millions (m). 0 disables the metric.
+func (s *Store) RuntimeDailyTokenLimitM() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.cfg.Runtime.DailyTokenLimitM > 0 {
+		return s.cfg.Runtime.DailyTokenLimitM
+	}
+	return 0
+}
+
+// RuntimeDailyRequestLimit reports the per-account daily request budget.
+// 0 disables the metric.
+func (s *Store) RuntimeDailyRequestLimit() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.cfg.Runtime.DailyRequestLimit > 0 {
+		return s.cfg.Runtime.DailyRequestLimit
+	}
+	return 0
+}
+
+// RuntimeDailyTokenLimit reports the per-account daily token budget in raw
+// tokens. 0 disables the metric.
+func (s *Store) RuntimeDailyTokenLimit() int64 {
+	return RuntimeConfig{DailyTokenLimitM: s.RuntimeDailyTokenLimitM()}.DailyTokenLimit()
+}
+
 func (s *Store) AutoDeleteSessions() bool {
 	return s.AutoDeleteMode() != "none"
 }

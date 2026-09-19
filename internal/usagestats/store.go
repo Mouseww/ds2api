@@ -33,6 +33,15 @@ type Store struct {
 	accounts map[string]*bucket
 	callers  map[string]*bucket
 
+	// dailyDay/dailyAccounts hold the current local calendar day's per-account
+	// counters. They back the daily account quota check, which runs on the
+	// account-acquire hot path and therefore needs an O(1) per-account lookup
+	// rather than an aggregation over the minute series. The window is keyed by
+	// local date because an operator's "daily" budget resets at local midnight,
+	// unlike the UTC-aligned dashboard buckets.
+	dailyDay      string
+	dailyAccounts map[string]*bucket
+
 	// accountSeries backs the per-account usage monitoring surface: cumulative
 	// totals plus the time buckets needed to render any dashboard range for a
 	// single account.
@@ -62,10 +71,17 @@ type snapshotFile struct {
 	Accounts      map[string]*bucket        `json:"accounts"`
 	Callers       map[string]*bucket        `json:"callers"`
 	AccountSeries map[string]*accountSeries `json:"account_series,omitempty"`
+	DailyDay      string                    `json:"daily_day,omitempty"`
+	DailyAccounts map[string]*bucket        `json:"daily_accounts,omitempty"`
 	Seconds       map[int64]*bucket         `json:"seconds"`
 	Minutes       map[int64]*bucket         `json:"minutes"`
 	Hours         map[int64]*bucket         `json:"hours"`
 	Days          map[int64]*bucket         `json:"days"`
+}
+
+// dailyDayKey renders the local calendar day a timestamp belongs to.
+func dailyDayKey(t time.Time) string {
+	return t.Format("2006-01-02")
 }
 
 // NewStore creates a usage store. An empty path keeps everything in memory and
@@ -85,6 +101,8 @@ func NewStore(path string) *Store {
 		minutes:       map[int64]*bucket{},
 		hours:         map[int64]*bucket{},
 		days:          map[int64]*bucket{},
+		dailyDay:      dailyDayKey(now),
+		dailyAccounts: map[string]*bucket{},
 	}
 	if store.path == "" {
 		return store
@@ -139,6 +157,7 @@ func (s *Store) Record(ev Event) {
 	bumpBreakdown(s.accounts, ev.AccountID, ev)
 	bumpBreakdown(s.callers, ev.CallerID, ev)
 	s.recordAccountLocked(ev, now)
+	s.recordDailyLocked(ev, now)
 
 	addBucket(s.seconds, now.Unix(), ev)
 	addBucket(s.minutes, now.Unix()/60, ev)
@@ -169,6 +188,8 @@ func (s *Store) Reset() error {
 	s.minutes = map[int64]*bucket{}
 	s.hours = map[int64]*bucket{}
 	s.days = map[int64]*bucket{}
+	s.dailyDay = dailyDayKey(time.Now())
+	s.dailyAccounts = map[string]*bucket{}
 	s.trackingSince = time.Now()
 	s.dirty = true
 	s.mu.Unlock()
@@ -254,6 +275,8 @@ func (s *Store) marshalLocked() ([]byte, error) {
 		Accounts:      s.accounts,
 		Callers:       s.callers,
 		AccountSeries: s.accountSeries,
+		DailyDay:      s.dailyDay,
+		DailyAccounts: s.dailyAccounts,
 		Seconds:       s.seconds,
 		Minutes:       s.minutes,
 		Hours:         s.hours,
@@ -294,13 +317,75 @@ func (s *Store) load() error {
 	s.hours = adoptBuckets(file.Hours)
 	s.days = adoptBuckets(file.Days)
 
+	// The daily quota window is only meaningful for the local day it was
+	// recorded in; a snapshot from an earlier day starts the new day empty.
+	now := time.Now()
+	today := dailyDayKey(now)
+	if file.DailyDay == today {
+		s.dailyDay = today
+		s.dailyAccounts = adoptBreakdowns(file.DailyAccounts)
+	} else {
+		s.dailyDay = today
+		s.dailyAccounts = map[string]*bucket{}
+	}
+
 	if file.TrackingSince > 0 {
 		s.trackingSince = time.UnixMilli(file.TrackingSince)
 	}
-	now := time.Now()
 	s.pruneLocked(now)
 	s.lastPrune = now
 	return nil
+}
+
+// recordDailyLocked folds an event into the current local day's per-account
+// counter, resetting the window when the day rolls over. Callers must hold
+// s.mu.
+func (s *Store) recordDailyLocked(ev Event, now time.Time) {
+	id := strings.TrimSpace(ev.AccountID)
+	if id == "" {
+		return
+	}
+	day := dailyDayKey(now)
+	if s.dailyDay != day {
+		s.dailyDay = day
+		s.dailyAccounts = map[string]*bucket{}
+	}
+	target, ok := s.dailyAccounts[id]
+	if !ok {
+		target = &bucket{}
+		s.dailyAccounts[id] = target
+	}
+	target.addEvent(ev)
+}
+
+// AccountDailyUsage returns each account's usage for the current local calendar
+// day, which backs the global per-account daily quota. It is intentionally
+// cheap: the counters are maintained incrementally on the record path, so the
+// result is a straight copy. Accounts without usage today are omitted.
+func (s *Store) AccountDailyUsage() map[string]AccountUsage {
+	out := map[string]AccountUsage{}
+	if s == nil {
+		return out
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.dailyDay != dailyDayKey(time.Now()) {
+		// No traffic has arrived yet today; the window is logically empty even
+		// though yesterday's counters are still in memory.
+		return out
+	}
+	for id, b := range s.dailyAccounts {
+		if b == nil {
+			continue
+		}
+		out[id] = AccountUsage{
+			Requests:         b.Requests,
+			PromptTokens:     b.Prompt,
+			CompletionTokens: b.Completion,
+			TotalTokens:      b.Total,
+		}
+	}
+	return out
 }
 
 // pruneLocked drops buckets that fell out of their retention window.

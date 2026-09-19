@@ -119,6 +119,15 @@ func (h *Handler) configImport(w http.ResponseWriter, r *http.Request) {
 			if incoming.Runtime.TokenRefreshIntervalHours > 0 {
 				next.Runtime.TokenRefreshIntervalHours = incoming.Runtime.TokenRefreshIntervalHours
 			}
+			if incoming.Runtime.ActivePoolSize > 0 {
+				next.Runtime.ActivePoolSize = incoming.Runtime.ActivePoolSize
+			}
+			if incoming.Runtime.DailyTokenLimitM > 0 {
+				next.Runtime.DailyTokenLimitM = incoming.Runtime.DailyTokenLimitM
+			}
+			if incoming.Runtime.DailyRequestLimit > 0 {
+				next.Runtime.DailyRequestLimit = incoming.Runtime.DailyRequestLimit
+			}
 		}
 
 		normalizeSettingsConfig(&next)

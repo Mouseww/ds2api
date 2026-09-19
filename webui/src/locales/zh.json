@@ -281,7 +281,10 @@
         "activePoolSizeLabel": "负载池目标账号数",
         "activePoolSizeUnlimited": "不限制",
         "usageTokens": "{tokens} Token",
-        "usageRequests": "{count} 次调用"
+        "usageRequests": "{count} 次调用",
+        "usageToday": "今日 {tokens} · {requests} 次",
+        "usageTodayTitle": "今日已用 {tokens} / 上限 {tokenLimit} Token；{requests} / 上限 {requestLimit} 次请求",
+        "dailyLimitReached": "已达今日限额"
     },
     "proxyManager": {
         "title": "代理 IP",
@@ -494,6 +497,10 @@
         "tokenRefreshIntervalHours": "托管账号 Token 刷新间隔（小时）",
         "activePoolSize": "负载池目标账号数（0=不限制）",
         "activePoolSizeHelp": "设置负载池中同时处于活跃状态的账号数量。0 表示使用全部可用账号。修改后即时生效。",
+        "dailyTokenLimitM": "单账号每日 Token 限额（百万，0=不限制）",
+        "dailyTokenLimitMHelp": "每个账号每天可消耗的 Token 上限，单位为百万（m）。与请求次数限额任一达到后，该账号当天即退出轮换池，自动换入未达标的账号。",
+        "dailyRequestLimit": "单账号每日请求次数限额（0=不限制）",
+        "dailyRequestLimitHelp": "每个账号每天可发起的请求次数上限。与 Token 限额任一达到后，该账号当天即退出轮换池。",
         "behaviorTitle": "行为设置",
         "responsesTTL": "Responses 缓存 TTL（秒）",
         "embeddingsProvider": "Embeddings Provider",

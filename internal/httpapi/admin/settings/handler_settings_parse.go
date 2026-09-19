@@ -82,6 +82,26 @@ func parseSettingsUpdateRequest(req map[string]any) (*config.AdminConfig, *confi
 			}
 			cfg.ActivePoolSize = n
 		}
+		if v, exists := raw["daily_token_limit_m"]; exists {
+			n := intFrom(v)
+			if n < 0 {
+				return nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("runtime.daily_token_limit_m must be >= 0")
+			}
+			if err := config.ValidateIntRange("runtime.daily_token_limit_m", n, 1, 100000000, false); err != nil {
+				return nil, nil, nil, nil, nil, nil, nil, nil, err
+			}
+			cfg.DailyTokenLimitM = n
+		}
+		if v, exists := raw["daily_request_limit"]; exists {
+			n := intFrom(v)
+			if n < 0 {
+				return nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("runtime.daily_request_limit must be >= 0")
+			}
+			if err := config.ValidateIntRange("runtime.daily_request_limit", n, 1, 1000000000, false); err != nil {
+				return nil, nil, nil, nil, nil, nil, nil, nil, err
+			}
+			cfg.DailyRequestLimit = n
+		}
 		if cfg.AccountMaxInflight > 0 && cfg.GlobalMaxInflight > 0 && cfg.GlobalMaxInflight < cfg.AccountMaxInflight {
 			return nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("runtime.global_max_inflight must be >= runtime.account_max_inflight")
 		}

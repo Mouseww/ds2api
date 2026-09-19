@@ -68,12 +68,23 @@ func (h *Handler) testAllAccounts(w http.ResponseWriter, r *http.Request) {
 	})
 
 	success := 0
+	banned := 0
 	for _, res := range results {
+		if isBanned, _ := res["banned"].(bool); isBanned {
+			banned++
+			continue
+		}
 		if ok, _ := res["success"].(bool); ok {
 			success++
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"total": len(accounts), "success": success, "failed": len(accounts) - success, "results": results})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"total":   len(accounts),
+		"success": success,
+		"banned":  banned,
+		"failed":  len(accounts) - success - banned,
+		"results": results,
+	})
 }
 
 func runAccountTestsConcurrently(accounts []config.Account, maxConcurrency int, testFn func(int, config.Account) map[string]any) []map[string]any {
@@ -124,6 +135,12 @@ func (h *Handler) testAccount(ctx context.Context, acc config.Account, model, me
 	if err := h.Store.UpdateAccountToken(acc.Identifier(), token); err != nil {
 		result["config_warning"] = "登录成功，但 token 持久化失败（仅保存在内存，重启后会丢失）: " + err.Error()
 	}
+	// The login response refreshed the ban fields: a banned account is disabled
+	// and evicted instead of being reported as a successful refresh.
+	if bannedAcc, banned := h.applyLoginBanState(identifier); banned {
+		markBannedResult(result, bannedAcc, int(time.Since(start).Milliseconds()))
+		return result
+	}
 	authCtx := &authn.RequestAuth{UseConfigToken: false, DeepSeekToken: token, AccountID: identifier, Account: acc}
 	proxyCtx := authn.WithAuth(ctx, authCtx)
 	sessionID, err := h.DS.CreateSession(proxyCtx, authCtx, 1)
@@ -137,6 +154,10 @@ func (h *Handler) testAccount(ctx context.Context, acc config.Account, model, me
 		authCtx.DeepSeekToken = token
 		if err := h.Store.UpdateAccountToken(acc.Identifier(), token); err != nil {
 			result["config_warning"] = "刷新 token 成功，但 token 持久化失败（仅保存在内存，重启后会丢失）: " + err.Error()
+		}
+		if bannedAcc, banned := h.applyLoginBanState(identifier); banned {
+			markBannedResult(result, bannedAcc, int(time.Since(start).Milliseconds()))
+			return result
 		}
 		sessionID, err = h.DS.CreateSession(proxyCtx, authCtx, 1)
 		if err != nil {

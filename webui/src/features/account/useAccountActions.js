@@ -228,10 +228,13 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, f
                 setSessionCounts(prev => ({ ...prev, [accountID]: data.session_count }))
             }
             
-            const statusMessage = data.success
-                ? t('apiTester.testSuccess', { account: accountID, time: data.response_time })
-                : `${accountID}: ${data.message}`
-            onMessage(data.success ? 'success' : 'error', statusMessage)
+            const isBanned = Boolean(data.banned)
+            const statusMessage = isBanned
+                ? t('accountManager.testBanned', { account: accountID })
+                : data.success
+                    ? t('apiTester.testSuccess', { account: accountID, time: data.response_time })
+                    : `${accountID}: ${data.message}`
+            onMessage(isBanned ? 'warning' : data.success ? 'success' : 'error', statusMessage)
             fetchAccounts()
             onRefresh()
         } catch (e) {
@@ -250,6 +253,7 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, f
         setBatchProgress({ current: 0, total: allAccounts.length, results: [] })
 
         let successCount = 0
+        let bannedCount = 0
         const results = []
 
         for (let i = 0; i < allAccounts.length; i++) {
@@ -268,8 +272,9 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, f
                     body: JSON.stringify({ identifier: id }),
                 })
                 const data = await res.json()
-                results.push({ id, success: data.success, message: data.message, time: data.response_time })
-                if (data.success) successCount++
+                results.push({ id, banned: Boolean(data.banned), success: data.success, message: data.message, time: data.response_time })
+                if (data.banned) bannedCount++
+                else if (data.success) successCount++
             } catch (e) {
                 results.push({ id, success: false, message: e.message })
             }
@@ -277,7 +282,11 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, f
             setBatchProgress({ current: i + 1, total: allAccounts.length, results: [...results] })
         }
 
-        onMessage('success', t('accountManager.testAllCompleted', { success: successCount, total: allAccounts.length }))
+        if (bannedCount > 0) {
+            onMessage('warning', t('accountManager.testAllCompletedBanned', { success: successCount, banned: bannedCount, total: allAccounts.length }))
+        } else {
+            onMessage('success', t('accountManager.testAllCompleted', { success: successCount, total: allAccounts.length }))
+        }
         fetchAccounts()
         onRefresh()
         setTestingAll(false)

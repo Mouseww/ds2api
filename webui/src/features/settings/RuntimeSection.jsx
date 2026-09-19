@@ -68,8 +68,33 @@ export default function RuntimeSection({ t, form, setForm }) {
                             ...prev,
                             runtime: { ...prev.runtime, token_refresh_interval_hours: Number(e.target.value || 1) },
                         }))}
+                <label className="text-sm space-y-2">
+                    <span className="text-muted-foreground">{t('settings.dailyTokenLimitM')}</span>
+                    <input
+                        type="number"
+                        min={0}
+                        value={form.runtime.daily_token_limit_m}
+                        onChange={(e) => setForm((prev) => ({
+                            ...prev,
+                            runtime: { ...prev.runtime, daily_token_limit_m: Number(e.target.value || 0) },
+                        }))}
                         className="w-full bg-background border border-border rounded-lg px-3 py-2"
                     />
+                    <span className="text-[10px] text-muted-foreground">{t('settings.dailyTokenLimitMHelp')}</span>
+                </label>
+                <label className="text-sm space-y-2">
+                    <span className="text-muted-foreground">{t('settings.dailyRequestLimit')}</span>
+                    <input
+                        type="number"
+                        min={0}
+                        value={form.runtime.daily_request_limit}
+                        onChange={(e) => setForm((prev) => ({
+                            ...prev,
+                            runtime: { ...prev.runtime, daily_request_limit: Number(e.target.value || 0) },
+                        }))}
+                        className="w-full bg-background border border-border rounded-lg px-3 py-2"
+                    />
+                    <span className="text-[10px] text-muted-foreground">{t('settings.dailyRequestLimitHelp')}</span>
                 </label>
             </div>
         </div>

@@ -193,6 +193,8 @@
         "invalidIdentifier": "Invalid account identifier. Operation aborted.",
         "testAllConfirm": "Refresh all account tokens and verify login?",
         "testAllCompleted": "Completed: {success}/{total} refreshed",
+        "testAllCompletedBanned": "Completed: {success}/{total} refreshed, {banned} banned",
+        "testBanned": "Account {account} is banned; it was disabled and removed from the rotation pool",
         "testFailed": "Test failed: {error}",
         "available": "Available",
         "inUse": "In use",
@@ -281,7 +283,10 @@
         "activePoolSizeLabel": "Active pool size",
         "activePoolSizeUnlimited": "Unlimited",
         "usageTokens": "{tokens} tokens",
-        "usageRequests": "{count} calls"
+        "usageRequests": "{count} calls",
+        "usageToday": "{tokens} · {requests} today",
+        "usageTodayTitle": "Used today: {tokens} of {tokenLimit} tokens; {requests} of {requestLimit} requests",
+        "dailyLimitReached": "Daily limit reached"
     },
     "proxyManager": {
         "title": "Proxy IPs",
@@ -494,6 +499,10 @@
         "tokenRefreshIntervalHours": "Managed token refresh interval (hours)",
         "activePoolSize": "Active pool size (0 = unlimited)",
         "activePoolSizeHelp": "Number of accounts kept active in the load pool at once. 0 means use all available accounts. Applies immediately.",
+        "dailyTokenLimitM": "Daily token limit per account (millions, 0 = unlimited)",
+        "dailyTokenLimitMHelp": "Maximum tokens each account may consume per day, in millions (m). When either this or the request limit is reached, the account leaves the rotation pool for the rest of the day and an account still under budget is swapped in.",
+        "dailyRequestLimit": "Daily request limit per account (0 = unlimited)",
+        "dailyRequestLimitHelp": "Maximum requests each account may make per day. When either this or the token limit is reached, the account leaves the rotation pool for the rest of the day.",
         "behaviorTitle": "Behavior",
         "responsesTTL": "Responses store TTL (seconds)",
         "embeddingsProvider": "Embeddings provider",

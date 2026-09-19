@@ -178,6 +178,21 @@ type RuntimeConfig struct {
 	// ActivePoolSize is the target number of simultaneously-active accounts in
 	// the load pool. 0 means "use all eligible accounts" (the default).
 	ActivePoolSize int `json:"active_pool_size,omitempty"`
+	// DailyTokenLimitM is the global per-account daily token budget, expressed
+	// in millions of tokens (m). 0 disables the token metric.
+	DailyTokenLimitM int `json:"daily_token_limit_m,omitempty"`
+	// DailyRequestLimit is the global per-account daily request budget.
+	// 0 disables the request metric.
+	DailyRequestLimit int `json:"daily_request_limit,omitempty"`
+}
+
+// DailyTokenLimit returns the per-account daily token budget in raw tokens.
+// It returns 0 when the metric is disabled.
+func (r RuntimeConfig) DailyTokenLimit() int64 {
+	if r.DailyTokenLimitM <= 0 {
+		return 0
+	}
+	return int64(r.DailyTokenLimitM) * 1_000_000
 }
 
 type ResponsesConfig struct {

@@ -55,6 +55,9 @@ func (p *Pool) acquireLocked(target string, exclude map[string]bool) (config.Acc
 		if !ok || !acc.IsEnabled() || acc.IsBanned() {
 			return config.Account{}, false
 		}
+		if p.accountDailyLimitedLocked(p.dailyUsageLocked(), target) {
+			return config.Account{}, false
+		}
 		p.inUse[target]++
 		p.bumpQueue(target)
 		return acc, true
@@ -64,9 +67,19 @@ func (p *Pool) acquireLocked(target string, exclude map[string]bool) (config.Acc
 }
 
 func (p *Pool) tryAcquire(exclude map[string]bool) (config.Account, bool) {
+	tokenLimit, requestLimit := p.dailyLimitsLocked()
+	usage := p.dailyUsageLocked()
+	// Swap in an account that has not reached its daily budget as soon as an
+	// active one exhausts either metric.
+	if p.promoteForDailyLimitsLocked(usage, tokenLimit, requestLimit) {
+		usage = p.dailyUsageLocked()
+	}
 	for i := 0; i < len(p.queue); i++ {
 		id := p.queue[i]
 		if exclude[id] || !p.canAcquireIDLocked(id) {
+			continue
+		}
+		if atDailyLimit(usage[id], tokenLimit, requestLimit) {
 			continue
 		}
 		acc, ok := p.store.FindAccount(id)

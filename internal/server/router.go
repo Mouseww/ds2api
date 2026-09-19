@@ -67,6 +67,17 @@ func NewApp() (*App, error) {
 	if err := usageStats.Err(); err != nil {
 		config.Logger.Warn("[usage_stats] unavailable", "path", usageStats.Path(), "error", err)
 	}
+	// The pool enforces the global per-account daily quota, so it needs today's
+	// per-account usage from the stats store.
+	pool.SetDailyUsageProvider(func() map[string]account.DailyUsage {
+		raw := usageStats.AccountDailyUsage()
+		out := make(map[string]account.DailyUsage, len(raw))
+		for id, usage := range raw {
+			out[id] = account.DailyUsage{Requests: usage.Requests, TotalTokens: usage.TotalTokens}
+		}
+		return out
+	})
+	pool.Rebalance()
 
 	modelsHandler := &shared.ModelsHandler{Store: store}
 	chatHandler := &chat.Handler{Store: store, Auth: resolver, DS: dsClient, ChatHistory: chatHistoryStore}

@@ -17,6 +17,12 @@ func validateMergedRuntimeSettings(current config.RuntimeConfig, incoming *confi
 		if incoming.TokenRefreshIntervalHours > 0 {
 			merged.TokenRefreshIntervalHours = incoming.TokenRefreshIntervalHours
 		}
+		if incoming.DailyTokenLimitM > 0 {
+			merged.DailyTokenLimitM = incoming.DailyTokenLimitM
+		}
+		if incoming.DailyRequestLimit > 0 {
+			merged.DailyRequestLimit = incoming.DailyRequestLimit
+		}
 	}
 	return validateRuntimeSettings(merged)
 }

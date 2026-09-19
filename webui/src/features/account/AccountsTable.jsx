@@ -106,9 +106,10 @@ export default function AccountsTable({
                             {batchProgress.results.map((r, i) => (
                                 <div key={i} className={clsx(
                                     "text-xs px-2 py-1 rounded border truncate",
+                                    r.banned ? "bg-yellow-400/10 border-yellow-400/30 text-yellow-600" :
                                     r.success ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-500" : "bg-destructive/10 border-destructive/20 text-destructive"
                                 )}>
-                                    {r.success ? '✓' : '✗'} {r.id}
+                                    {r.banned ? '⚠' : r.success ? '✓' : '✗'} {r.id}
                                 </div>
                             ))}
                         </div>
@@ -133,7 +134,7 @@ export default function AccountsTable({
                                 <div className="flex items-center gap-3 min-w-0">
                                     <div className={clsx(
                                         "w-2 h-2 rounded-full shrink-0",
-                                        isBanned ? "bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.7)]" :
+                                        isBanned ? "bg-yellow-400 shadow-[0_0_8px_rgba(250,204,21,0.7)]" :
                                         acc.test_status === 'failed' ? "bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.5)]" :
                                         isActive ? "bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]" :
                                         runtimeUnknown ? "bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.5)]" : "bg-amber-500"
@@ -142,7 +143,7 @@ export default function AccountsTable({
                                         <div className="flex items-center gap-2">
                                             <div className="text-sm font-medium truncate">{acc.name || '-'}</div>
                                             {isBanned && (
-                                                <span className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-500/10 text-red-500 border border-red-500/20">
+                                                <span className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-yellow-400/10 text-yellow-600 border border-yellow-400/30">
                                                     <AlertTriangle className="w-3 h-3" /> {t('accountManager.banned')}
                                                 </span>
                                             )}
@@ -152,7 +153,7 @@ export default function AccountsTable({
                                                 </span>
                                             )}
                                             {!isEnabled && acc.disabled_reason === 'banned' && (
-                                                <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-500/10 text-red-500 border border-red-500/20">
+                                                <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-yellow-400/10 text-yellow-600 border border-yellow-400/30">
                                                     {t('accountManager.disabledByBan')}
                                                 </span>
                                             )}
@@ -171,10 +172,10 @@ export default function AccountsTable({
                                             <div className="text-xs text-muted-foreground truncate mt-0.5">{acc.remark}</div>
                                         )}
                                         {isBanned && unbanTime && (
-                                            <div className="text-[10px] text-red-500 mt-0.5">{t('accountManager.unbanAt', { time: unbanTime })}</div>
+                                            <div className="text-[10px] text-yellow-600 mt-0.5">{t('accountManager.unbanAt', { time: unbanTime })}</div>
                                         )}
                                         {isBanned && !unbanTime && (
-                                            <div className="text-[10px] text-red-500/60 mt-0.5">{t('accountManager.noUnbanTime')}</div>
+                                            <div className="text-[10px] text-yellow-600/70 mt-0.5">{t('accountManager.noUnbanTime')}</div>
                                         )}
                                         {acc.ban_status > 0 && (
                                             <span className="text-[10px] text-muted-foreground mt-0.5">{t('accountManager.statusCode')}: {acc.ban_status}</span>
@@ -197,6 +198,32 @@ export default function AccountsTable({
                                             <span className="font-mono bg-cyan-500/10 text-cyan-500 px-1.5 py-0.5 rounded text-[10px]">
                                                 {t('accountManager.usageRequests', { count: acc.usage_requests || 0 })}
                                             </span>
+                                            {(acc.daily_token_limit > 0 || acc.daily_request_limit > 0) && (
+                                                <span
+                                                    className={clsx(
+                                                        "font-mono px-1.5 py-0.5 rounded text-[10px] border",
+                                                        acc.daily_limited
+                                                            ? "bg-yellow-400/10 text-yellow-600 border-yellow-400/30"
+                                                            : "bg-muted text-muted-foreground border-border"
+                                                    )}
+                                                    title={t('accountManager.usageTodayTitle', {
+                                                        tokens: formatTokens(acc.usage_today_tokens || 0),
+                                                        tokenLimit: acc.daily_token_limit > 0 ? formatTokens(acc.daily_token_limit) : '-',
+                                                        requests: acc.usage_today_requests || 0,
+                                                        requestLimit: acc.daily_request_limit > 0 ? acc.daily_request_limit : '-',
+                                                    })}
+                                                >
+                                                    {t('accountManager.usageToday', {
+                                                        tokens: formatTokens(acc.usage_today_tokens || 0),
+                                                        requests: acc.usage_today_requests || 0,
+                                                    })}
+                                                </span>
+                                            )}
+                                            {acc.daily_limited && (
+                                                <span className="font-mono bg-yellow-400/10 text-yellow-600 px-1.5 py-0.5 rounded text-[10px] border border-yellow-400/30">
+                                                    {t('accountManager.dailyLimitReached')}
+                                                </span>
+                                            )}
                                             {sessionCounts && sessionCounts[id] !== undefined && sessionCounts[id] > 0 && (
                                                 <button
                                                     onClick={() => onDeleteAllSessions(id)}

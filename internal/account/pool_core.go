@@ -3,6 +3,7 @@ package account
 import (
 	"sort"
 	"sync"
+	"time"
 
 	"ds2api/internal/config"
 )
@@ -19,6 +20,12 @@ type Pool struct {
 	maxQueueSize           int
 	globalMaxInflight      int
 	activePoolSize         int
+
+	// Daily quota enforcement: the provider reports per-account usage for the
+	// current local day, cached briefly so the acquire path stays cheap.
+	dailyUsageProvider DailyUsageProvider
+	dailyUsageCache    map[string]DailyUsage
+	dailyUsageCachedAt time.Time
 }
 
 func NewPool(store *config.Store) *Pool {
@@ -132,8 +139,11 @@ func (p *Pool) rebuildQueueLocked() {
 	p.standby = standby
 }
 
-// eligibleAccountsLocked returns enabled, non-banned accounts in the existing
-// stable token-first ordering. Must be called with p.mu held.
+// eligibleAccountsLocked returns enabled, non-banned accounts that have not
+// exhausted their daily quota, in the existing stable token-first ordering.
+// Excluding over-quota accounts here is what makes a standby account take the
+// place of an active one that reached its daily limit. Must be called with p.mu
+// held.
 func (p *Pool) eligibleAccountsLocked() []config.Account {
 	var accounts []config.Account
 	if p.store != nil {
@@ -147,9 +157,13 @@ func (p *Pool) eligibleAccountsLocked() []config.Account {
 		}
 		return iHas
 	})
+	usage := p.dailyUsageLocked()
 	out := make([]config.Account, 0, len(accounts))
 	for _, acc := range accounts {
 		if acc.Identifier() == "" || !acc.IsEnabled() || acc.IsBanned() {
+			continue
+		}
+		if p.accountDailyLimitedLocked(usage, acc.Identifier()) {
 			continue
 		}
 		out = append(out, acc)
@@ -240,5 +254,6 @@ func (p *Pool) Status() map[string]any {
 		"standby_count":            len(p.standby),
 		"banned_count":             bannedCount,
 		"disabled_count":           disabledCount,
+		"daily_limited_count":      p.dailyLimitedCountLocked(),
 	}
 }

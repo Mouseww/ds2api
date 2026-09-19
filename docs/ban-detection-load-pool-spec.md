@@ -1,4 +1,4 @@
-# DS2API 账号封禁检测与负载池 — 需求规格
+﻿# DS2API 账号封禁检测与负载池 — 需求规格
 
 > 状态：需求规格（requirements）
 > 范围：账号封禁检测、自动禁用、负载池目标并发账号数（`active_pool_size`）与备用账号补足、Admin API 与 WebUI 暴露面。
@@ -234,7 +234,7 @@ type RuntimeConfig struct {
 ### 6.1 账号表（`AccountsTable.jsx`）新增列/徽标
 1. **启用/禁用开关**：每行新增一个 toggle（或开关按钮），调用 `PUT /admin/accounts/{identifier}` 传 `enabled`；禁用账号行视觉置灰并标注「已禁用」。
 2. **封禁状态徽标**：
-   - `ban_is_muted == 1` → 红色徽标「已封禁」。
+   - `ban_is_muted == 1` → 黄色徽标「已封禁」（检测结果中不得显示为绿色）。
    - 同时展示解封时间：`ban_mute_until > 0` 时格式化显示「解封于 <本地时间>」；`== 0` 显示「无解封时间」。
    - `ban_status` 可附带展示为「状态码 <N>」（次要信息）。
 3. **禁用原因**：`disabled_reason == "banned"` 显示「因封禁自动禁用」；`"manual"` 显示「手动禁用」。
@@ -271,3 +271,13 @@ type RuntimeConfig struct {
 4. **Vercel/环境变量回写**：`enabled`/`disabled_reason`/`active_pool_size` 走既有 `Store.Update` 持久化路径，遵循现有 env-writeback 语义（该 skip 则 skip，不新增写路径）。
 5. **并发安全**：`rebalance`、`RemoveAccount`、`Acquire*` 共享同一把池锁；`lastBanRecheckAt` 由 `Resolver.mu` 保护。
 6. **测试**：为 `extractBanFields`（已有）、封禁→禁用、rebalance 补足、`active_pool_size` 校验、Admin API 新增字段、Settings 读写新增字段各补单元/HTTP 测试，纳入仓库 `./tests/scripts/run-unit-all.sh` 与 `./scripts/lint.sh` 门槛。
+
+## 全局单账号每日限额（Daily Quota）
+
+- 设置项：`runtime.daily_token_limit_m`（单位百万，`m`，0 = 不限制）与 `runtime.daily_request_limit`（次，0 = 不限制）。
+- 两个指标是**独立或**关系：任一达到上限，该账号当日即退出轮换池。
+- 触发后由备用池中未达上限的账号补位；主动池与备用池均按同一规则过滤。
+- 统计口径为账号**本地日历日**（与仪表盘 UTC 桶不同），跨天后自动清零。
+- 账号列表返回 `usage_today_requests`、`usage_today_tokens`、`daily_token_limit`、`daily_request_limit`、`daily_limited` 供界面展示。
+- 用量结果在账号获取热路径上缓存 5 秒，因此超限判定最多滞后约 5 秒生效。
+- 界面：达到限额的账号显示黄色「已达今日限额」徽标；今日用量以 `今日 X · Y 次` 展示，悬停可见上限。
