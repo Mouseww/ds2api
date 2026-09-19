@@ -1,6 +1,9 @@
 package openai
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestSanitizeLeakedOutputRemovesEmptyJSONFence(t *testing.T) {
 	raw := "before\n```json\n```\nafter"
@@ -73,6 +76,31 @@ func TestSanitizeLeakedOutputRemovesCompleteDSMLToolCallWrapper(t *testing.T) {
 	got := sanitizeLeakedOutput(raw)
 	if got != "前置文本\n\n后置文本" {
 		t.Fatalf("unexpected sanitize result for leaked dsml wrapper: %q", got)
+	}
+}
+
+func TestSanitizeLeakedOutputStripsOrphanedDSMLToolCallMarkup(t *testing.T) {
+	// A malformed tool call the model emitted: a stray closing wrapper, a bare
+	// tool-name tag, orphaned parameter tags and dangling CDATA markers. None
+	// of it forms a complete <tool_calls> block, so the sieve passes it through
+	// as text and this sanitizer is the last line of defense against the markup
+	// becoming visible to the user.
+	raw := "</|DSML|tool_calls><Tool>:echo hi\n" +
+		"']]></|DSML|parameter>\n" +
+		"<|DSML|parameter name=\"description\"><![CDATA[拉取服务器证据]]></|DSML|parameter>\n" +
+		"<|DSML|parameter name=\"timeout\"><![CDATA[120000]]></|DSML|parameter>\n" +
+		"</|DSML|parameter>\n" +
+		"</|DSML|tool_calls>\n" +
+		"</|DSML|tool_calls>"
+	got := sanitizeLeakedOutput(raw)
+	if strings.Contains(got, "DSML") {
+		t.Fatalf("orphaned DSML markup leaked: %q", got)
+	}
+	if strings.Contains(got, "CDATA") || strings.Contains(got, "]]>") {
+		t.Fatalf("CDATA markers leaked: %q", got)
+	}
+	if !strings.Contains(got, "echo hi") {
+		t.Fatalf("expected command text to be preserved, got %q", got)
 	}
 }
 

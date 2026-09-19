@@ -201,6 +201,18 @@ func findToolSegmentStart(state *State, s string) int {
 		if !ok {
 			return -1
 		}
+		// Closing tags never begin a valid tool-call block. A stray closing
+		// wrapper (e.g. a leaked </|DSML|tool_calls>) must not trigger capture.
+		if tag.Closing {
+			offset = tag.End + 1
+			continue
+		}
+		// A bare parameter tag is never a valid block start either: parameters
+		// only appear nested inside an invoke/tool_calls wrapper.
+		if tag.Name == "parameter" {
+			offset = tag.End + 1
+			continue
+		}
 		start := includeDuplicateLeadingLessThan(s, tag.Start)
 		if insideCodeFenceWithState(state, s[:start]) {
 			offset = tag.End + 1

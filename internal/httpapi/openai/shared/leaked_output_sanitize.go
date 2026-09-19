@@ -78,20 +78,37 @@ func stripLeakedToolCallWrapperBlocks(text string) string {
 		if tag.Start > pos {
 			b.WriteString(text[pos:tag.Start])
 		}
-		if tag.Closing || tag.Name != "tool_calls" {
-			b.WriteString(text[tag.Start : tag.End+1])
-			pos = tag.End + 1
-			continue
+		// A complete <tool_calls>...</tool_calls> block is stripped entirely.
+		if !tag.Closing && tag.Name == "tool_calls" {
+			if closeTag, ok := toolcall.FindMatchingToolMarkupClose(text, tag); ok {
+				pos = closeTag.End + 1
+				continue
+			}
 		}
-		closeTag, ok := toolcall.FindMatchingToolMarkupClose(text, tag)
-		if !ok {
-			b.WriteString(text[tag.Start : tag.End+1])
-			pos = tag.End + 1
-			continue
-		}
-		pos = closeTag.End + 1
+		// Any other recognized tool-call markup tag is leaked markup that the
+		// stream sieve failed to capture: a stray closing wrapper, an orphaned
+		// parameter/invoke tag, or an unclosed wrapper opening. Drop the tag
+		// itself while keeping the surrounding text.
+		pos = tag.End + 1
 	}
-	return b.String()
+	return stripLeakedCDATAMarkers(b.String())
+}
+
+// leakedCDATAOpenPattern and leakedCDATAClosePattern strip the CDATA wrappers
+// that remain when an orphaned parameter tag is dropped. The content inside
+// the CDATA is preserved; only the <![CDATA[ ... ]]> delimiters are removed.
+var leakedCDATAOpenPattern = regexp.MustCompile(`<!\[CDATA\[`)
+var leakedCDATAClosePattern = regexp.MustCompile(`\]\]>`)
+
+func stripLeakedCDATAMarkers(text string) string {
+	if text == "" {
+		return text
+	}
+	if !strings.Contains(text, "CDATA") && !strings.Contains(text, "]]>") {
+		return text
+	}
+	out := leakedCDATAOpenPattern.ReplaceAllString(text, "")
+	return leakedCDATAClosePattern.ReplaceAllString(out, "")
 }
 
 func stripDanglingThinkSuffix(text string) string {

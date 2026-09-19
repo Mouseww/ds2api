@@ -204,6 +204,18 @@ function findToolSegmentStart(state, s) {
     if (!tag) {
       return -1;
     }
+    // Closing tags never begin a valid tool-call block. A stray closing
+    // wrapper (e.g. a leaked </|DSML|tool_calls>) must not trigger capture.
+    if (tag.closing) {
+      offset = tag.end + 1;
+      continue;
+    }
+    // A bare parameter tag is never a valid block start either: parameters
+    // only appear nested inside an invoke/tool_calls wrapper.
+    if (tag.name === 'parameter') {
+      offset = tag.end + 1;
+      continue;
+    }
     if (insideCodeFenceWithState(state, s.slice(0, tag.start))) {
       offset = tag.end + 1;
       continue;

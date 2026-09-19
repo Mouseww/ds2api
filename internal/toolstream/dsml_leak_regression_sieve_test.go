@@ -55,3 +55,54 @@ func TestSieveVerbatimLeakedSamplesAcrossChunkSizes(t *testing.T) {
 		}
 	}
 }
+
+// orphanedDSMLToolCallSample is a byte-exact production leak: the model emitted
+// a tool call whose opening wrapper was corrupted into a stray closing tag and
+// whose invoke became a bare <Tool> tag, leaving only orphaned parameter and
+// closing tags. The sieve must not stall on this (it must release it as text
+// so the downstream output sanitizer can strip the markup), and it must not
+// mis-detect it as an executable tool call.
+const orphanedDSMLToolCallSample = "</|DSML|tool_calls><Tool>:echo hi\n" +
+	"']]></|DSML|parameter>\n" +
+	"<|DSML|parameter name=\"description\"><![CDATA[拉取服务器证据]]></|DSML|parameter>\n" +
+	"<|DSML|parameter name=\"timeout\"><![CDATA[120000]]></|DSML|parameter>\n" +
+	"</|DSML|parameter>\n" +
+	"</|DSML|tool_calls>\n" +
+	"</|DSML|tool_calls>"
+
+func TestSieveOrphanedDSMLToolCallDoesNotStallOrExecute(t *testing.T) {
+	for _, size := range []int{0, 1, 2, 3, 5, 7, 13, 64} {
+		var state State
+		var events []Event
+		if size == 0 {
+			events = append(events, ProcessChunk(&state, orphanedDSMLToolCallSample, []string{"Tool"})...)
+		} else {
+			for i := 0; i < len(orphanedDSMLToolCallSample); i += size {
+				end := i + size
+				if end > len(orphanedDSMLToolCallSample) {
+					end = len(orphanedDSMLToolCallSample)
+				}
+				events = append(events, ProcessChunk(&state, orphanedDSMLToolCallSample[i:end], []string{"Tool"})...)
+			}
+		}
+		events = append(events, Flush(&state, []string{"Tool"})...)
+
+		calls := 0
+		var content strings.Builder
+		for _, evt := range events {
+			calls += len(evt.ToolCalls)
+			content.WriteString(evt.Content)
+		}
+		if calls != 0 {
+			t.Fatalf("size=%d: malformed orphaned DSML must not execute as a tool call, got %d", size, calls)
+		}
+		if state.capturing {
+			t.Fatalf("size=%d: sieve left capture open after Flush", size)
+		}
+		// The raw text must be released (not swallowed) so the downstream
+		// sanitizer can strip the markup; but it must not be re-ordered.
+		if got := content.String(); !strings.Contains(got, "echo hi") {
+			t.Fatalf("size=%d: expected released text to preserve command body, got %q", size, got)
+		}
+	}
+}
