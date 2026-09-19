@@ -38,10 +38,12 @@ type ConfigStore interface {
 	ThinkingInjectionEnabled() bool
 	ThinkingInjectionPrompt() string
 	AutoDeleteSessions() bool
+	RuntimeActivePoolSize() int
 }
 
 type PoolController interface {
 	Reset()
+	Rebalance()
 	Status() map[string]any
 	ApplyRuntimeLimits(maxInflightPerAccount, maxQueueSize, globalMaxInflight int)
 }

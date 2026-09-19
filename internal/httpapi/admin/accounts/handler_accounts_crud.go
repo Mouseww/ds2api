@@ -59,16 +59,21 @@ func (h *Handler) listAccounts(w http.ResponseWriter, r *http.Request) {
 		testStatus, _ := h.Store.AccountTestStatus(acc.Identifier())
 		token := strings.TrimSpace(acc.Token)
 		items = append(items, map[string]any{
-			"identifier":    acc.Identifier(),
-			"name":          acc.Name,
-			"remark":        acc.Remark,
-			"email":         acc.Email,
-			"mobile":        acc.Mobile,
-			"proxy_id":      acc.ProxyID,
-			"has_password":  acc.Password != "",
-			"has_token":     token != "",
-			"token_preview": maskSecretPreview(token),
-			"test_status":   testStatus,
+			"identifier":      acc.Identifier(),
+			"name":            acc.Name,
+			"remark":          acc.Remark,
+			"email":           acc.Email,
+			"mobile":          acc.Mobile,
+			"proxy_id":        acc.ProxyID,
+			"has_password":    acc.Password != "",
+			"has_token":       token != "",
+			"token_preview":   maskSecretPreview(token),
+			"test_status":     testStatus,
+			"enabled":         acc.IsEnabled(),
+			"disabled_reason": acc.DisabledReason,
+			"ban_is_muted":    acc.BanIsMuted,
+			"ban_mute_until":  acc.BanMuteUntil,
+			"ban_status":      acc.BanStatus,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "page": page, "page_size": pageSize, "total_pages": totalPages})
@@ -121,6 +126,7 @@ func (h *Handler) updateAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	name, nameOK := fieldStringOptional(req, "name")
 	remark, remarkOK := fieldStringOptional(req, "remark")
+	enabledVal, enabledOK := fieldBool(req, "enabled")
 
 	err := h.Store.Update(func(c *config.Config) error {
 		for i, acc := range c.Accounts {
@@ -133,6 +139,14 @@ func (h *Handler) updateAccount(w http.ResponseWriter, r *http.Request) {
 			if remarkOK {
 				c.Accounts[i].Remark = remark
 			}
+			if enabledOK {
+				c.Accounts[i].Enabled = &enabledVal
+				if enabledVal {
+					c.Accounts[i].DisabledReason = ""
+				} else {
+					c.Accounts[i].DisabledReason = "manual"
+				}
+			}
 			return nil
 		}
 		return newRequestError("账号不存在")
@@ -144,6 +158,9 @@ func (h *Handler) updateAccount(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
 		return
+	}
+	if enabledOK {
+		h.Pool.Rebalance()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "total_accounts": len(h.Store.Snapshot().Accounts)})
 }
@@ -173,4 +190,19 @@ func (h *Handler) deleteAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	h.Pool.Reset()
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "total_accounts": len(h.Store.Snapshot().Accounts)})
+}
+
+func fieldBool(m map[string]any, key string) (bool, bool) {
+	v, ok := m[key]
+	if !ok || v == nil {
+		return false, false
+	}
+	switch x := v.(type) {
+	case bool:
+		return x, true
+	case string:
+		return strings.ToLower(strings.TrimSpace(x)) == "true", true
+	default:
+		return false, false
+	}
 }

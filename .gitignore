@@ -64,6 +64,12 @@ CLAUDE.local.md
 # Local tool bootstrap cache
 .tmp/
 
+# Agent Teams plugin state
+.agent-teams/
+
+# Go build cache (sandbox)
+.gocache/
+
 # Chat history
 data/
 .codex

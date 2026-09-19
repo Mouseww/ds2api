@@ -31,6 +31,7 @@ func (h *Handler) applyRuntimeSettings() {
 	maxQueue := h.Store.RuntimeAccountMaxQueue(recommended)
 	global := h.Store.RuntimeGlobalMaxInflight(recommended)
 	h.Pool.ApplyRuntimeLimits(maxPer, maxQueue, global)
+	h.Pool.Rebalance()
 }
 
 func defaultRuntimeRecommended(accountCount, maxPer int) int {

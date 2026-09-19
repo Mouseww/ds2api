@@ -236,11 +236,13 @@ cp config.example.json config.json
 ### 方式二：Docker 运行
 
 ```bash
-# 1. 准备环境变量和配置文件
-cp .env.example .env
-cp config.example.json config.json
+# 1. （可选）准备环境变量和配置文件
+#    缺少 .env 时所有环境变量使用下方 docker-compose.yml 中的默认值；
+#    缺少 config.json 时服务会自动以空配置启动并打印告警。
+# cp .env.example .env
+# cp config.example.json config.json
 
-# 2. 编辑 .env（至少设置 DS2API_ADMIN_KEY；如需修改宿主机端口，可额外设置 DS2API_HOST_PORT）
+# 2. （可选）编辑 .env（至少设置 DS2API_ADMIN_KEY；如需修改宿主机端口，可额外设置 DS2API_HOST_PORT）
 #    DS2API_ADMIN_KEY=请替换为强密码
 
 # 3. 启动
@@ -252,7 +254,9 @@ docker-compose logs -f
 
 默认 `docker-compose.yml` 会把宿主机 `6011` 映射到容器内的 `5001`。如果你希望直接对外暴露 `5001`，请设置 `DS2API_HOST_PORT=5001`（或者手动调整 `ports` 配置）。
 同时默认把 `./config.json` 挂载到容器 `/data/config.json`，并设置 `DS2API_CONFIG_PATH=/data/config.json`，用于避免 `/app` 只读导致运行时 token 持久化失败。
-镜像会预创建 `/data` 并授权给非 root 的 `ds2api` 用户；如果使用单文件 bind mount，请确保宿主机 `config.json` 对容器用户可读写，例如 `chmod 644 config.json`。
+镜像会预创建 `/data` 并授权给非 root 的 `ds2api` 用户。
+**注意**：若宿主机 `config.json` 不存在，Docker 会把它创建为**空目录**而非文件（单文件 bind mount 缺源时的行为）。此时服务仍会启动，但日志会输出 `WARN` 告警，指导移除该目录并创建配置文件。建议在首次启动前执行 `cp config.example.json config.json` 以避免目录陷阱。如使用单文件 bind mount，还需确保 `config.json` 对容器用户可读写，例如 `chmod 644 config.json`。
+**语义边界**：只有「配置不可用」才会自举启动——文件不存在、配置路径是目录、配置文件对容器用户不可读（权限不足）；「配置内容错误」仍然致命并保持退出——JSON 非法或 `ValidateConfig` 语义校验失败。
 
 更新镜像：`docker-compose up -d --build`
 

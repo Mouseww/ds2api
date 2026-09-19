@@ -35,6 +35,26 @@ type Account struct {
 	Token    string `json:"token,omitempty"`
 	DeviceID string `json:"device_id,omitempty"`
 	ProxyID  string `json:"proxy_id,omitempty"`
+	// Enabled controls whether the account may be allocated by the load pool.
+	// A nil pointer means "enabled" for backward compatibility with older configs.
+	Enabled *bool `json:"enabled,omitempty"`
+	// DisabledReason records why the account was disabled: "" (none),
+	// "banned" (auto-disabled by ban detection) or "manual".
+	DisabledReason string `json:"disabled_reason,omitempty"`
+	// Ban status, refreshed on each login / token refresh.
+	BanIsMuted   int     `json:"ban_is_muted,omitempty"`   // 1 = muted (user.chat.is_muted)
+	BanMuteUntil float64 `json:"ban_mute_until,omitempty"` // unix ts when mute expires (user.chat.mute_until)
+	BanStatus    int     `json:"ban_status,omitempty"`     // account status code (user.status)
+}
+
+// IsEnabled reports whether the account is eligible for pool allocation.
+func (a Account) IsEnabled() bool {
+	return a.Enabled == nil || *a.Enabled
+}
+
+// IsBanned reports whether the account is currently muted/banned by DeepSeek.
+func (a Account) IsBanned() bool {
+	return a.BanIsMuted == 1
 }
 
 type APIKey struct {
@@ -155,6 +175,9 @@ type RuntimeConfig struct {
 	AccountMaxQueue           int `json:"account_max_queue,omitempty"`
 	GlobalMaxInflight         int `json:"global_max_inflight,omitempty"`
 	TokenRefreshIntervalHours int `json:"token_refresh_interval_hours,omitempty"`
+	// ActivePoolSize is the target number of simultaneously-active accounts in
+	// the load pool. 0 means "use all eligible accounts" (the default).
+	ActivePoolSize int `json:"active_pool_size,omitempty"`
 }
 
 type ResponsesConfig struct {

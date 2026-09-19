@@ -113,11 +113,16 @@ cp config.example.json config.json
 # Pull prebuilt image
 docker pull ghcr.io/cjackhwang/ds2api:latest
 
-# Copy env template and config file
-cp .env.example .env
-cp config.example.json config.json
+# (Optional) Copy env template and config file
+# - A missing .env no longer blocks startup: docker-compose.yml declares
+#   env_file with required: false, so the defaults in `environment`
+#   (for example DS2API_ADMIN_KEY=ds2api) still apply;
+# - A missing config.json makes the service boot with an empty file-backed
+#   config and log a WARN warning.
+# cp .env.example .env
+# cp config.example.json config.json
 
-# Edit .env and set at least:
+# (Optional) Edit .env and set at least:
 #   DS2API_ADMIN_KEY=your-admin-key
 # Optionally set the host port:
 #   DS2API_HOST_PORT=6011
@@ -132,6 +137,8 @@ docker-compose logs -f
 The default `docker-compose.yml` directly uses `ghcr.io/cjackhwang/ds2api:latest` and maps host port `6011` to container port `5001`. If you want `5001` exposed directly, set `DS2API_HOST_PORT=5001` (or adjust the `ports` mapping).
 The compose template also defaults to `DS2API_CONFIG_PATH=/data/config.json` with `./config.json:/data/config.json` mounted, so deployments avoid read-only `/app` persistence issues by default.
 The image pre-creates `/data` and grants it to the non-root `ds2api` user. If you bind-mount a single host file, make sure `config.json` is readable/writable by the container user, for example with `chmod 644 config.json`; otherwise Linux UID/GID mismatches can still cause `open /data/config.json: permission denied`.
+**Single-file bind mount directory trap**: if the host `config.json` does not exist, Docker creates the mount source `./config.json` as an **empty directory** (not a file), so `/data/config.json` inside the container is a directory. The fixed build no longer exits because of this: when it detects that the config path is a directory, it boots with an empty file-backed config and logs a `WARN` line whose `reason` field carries actionable repair guidance — remove that directory and create the file on the host (`rm -rf config.json && cp config.example.json config.json`), then restart.
+**Bootstrap semantics boundary**: only an *unavailable* config bootstraps — the file does not exist, the config path is a directory, or the file is unreadable by the container user (permission denied). Invalid config *content* stays fatal and still exits: malformed JSON (`json.Unmarshal` failure) or a `ValidateConfig` semantic validation failure. Bootstrapping uses an empty file-backed config, and the Admin UI writes the file on the first save.
 Compatibility note: when `DS2API_CONFIG_PATH` is unset and runtime base dir is `/app`, newer versions prefer `/data/config.json`; if that file is missing but legacy `/app/config.json` exists, DS2API automatically falls back to the legacy path to avoid post-upgrade config loss.
 
 If you want a pinned version instead of `latest`, you can also pull a specific tag directly:
@@ -197,7 +204,7 @@ This repo includes a `zeabur.yaml` template for one-click deployment on Zeabur:
 Notes:
 
 - **Port**: DS2API listens on `5001` by default; the template sets `PORT=5001`.
-- **Persistent config**: the template mounts `/data` and sets `DS2API_CONFIG_PATH=/data/config.json`. On a fresh volume, DS2API starts with an empty file-backed config; after importing config in Admin UI, it will be written and persisted to this path.
+- **Persistent config**: the template mounts `/data` and sets `DS2API_CONFIG_PATH=/data/config.json`. On a fresh volume that file does not exist yet, so DS2API starts with an empty file-backed config (the log line is `WARN` level and states the bootstrap reason); after importing config in Admin UI, it will be written and persisted to this path. The same bootstrap applies to the other two *unavailable* shapes — the config path being created as a directory, or the file being unreadable by the container user — while invalid config *content* (bad JSON or failed semantic validation) still fails startup.
 - **`open /app/config.json: permission denied`**: this means the instance is trying to persist runtime tokens to a read-only path (commonly `/app` inside the image).  
   Recommended handling:
   1. Set a writable path explicitly: `DS2API_CONFIG_PATH=/data/config.json` (and mount a persistent volume at `/data`);
@@ -227,11 +234,11 @@ If you do not want to use the `zeabur.yaml` one-click template, deploy directly 
 | `DS2API_ENV_WRITEBACK` | `1` | Optional; enable only when using `DS2API_CONFIG_JSON` and you want the initial config written to `/data/config.json`. |
 
 7. Expose HTTP port `5001`. The health check path can be `/healthz`.
-8. After deployment, open `/admin`, login with `DS2API_ADMIN_KEY`, then import or edit config in Admin UI. A fresh volume does not need `/data/config.json` up front; the service boots first and creates the file on the first save.
+8. After deployment, open `/admin`, login with `DS2API_ADMIN_KEY`, then import or edit config in Admin UI. A fresh volume does not need `/data/config.json` up front: a missing file, a directory at that path, and an unreadable file all bootstrap to an empty file-backed config with a `WARN` warning, so the service boots first and creates the file on the first save; only invalid file content (bad JSON / failed semantic validation) makes startup fail.
 
 Troubleshooting:
 
-- **Startup log says `open /data/config.json: no such file or directory`**: make sure you deployed a version that includes the fresh-volume bootstrap fix, then redeploy the latest code.
+- **Startup log says `open /data/config.json: no such file or directory` or `read /data/config.json: is a directory`**: on a build that includes the config bootstrap fix, neither case exits the process any more — the service continues with a `WARN` log and an empty file-backed config (the `reason` field carries repair guidance). If you see an ERROR-level failure with the container exiting or restarting, you are running an older image without this fix; redeploy the latest code.
 - **`open /app/config.json: permission denied`**: the config path still points at the read-only image directory; mount `/data` and set `DS2API_CONFIG_PATH=/data/config.json`.
 - **Config disappears after restart**: check that the `/data` persistent volume is mounted on this service. If you use `DS2API_CONFIG_JSON` but want Admin UI saves persisted, enable `DS2API_ENV_WRITEBACK=1`.
 

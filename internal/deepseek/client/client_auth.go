@@ -59,6 +59,7 @@ func (c *Client) Login(ctx context.Context, acc config.Account) (string, error) 
 		return "", errors.New("missing login token")
 	}
 	logLoginBizData(acc, bizData)
+	c.updateAccountBanStatus(acc, user)
 	ssoID, _ := user["id"].(string)
 	loginAuth := &auth.RequestAuth{
 		UseConfigToken: true,
@@ -122,6 +123,27 @@ func maskTokenValue(v any) string {
 		return "***"
 	}
 	return s[:4] + "***" + s[len(s)-4:]
+}
+
+func (c *Client) updateAccountBanStatus(acc config.Account, user map[string]any) {
+	if c == nil || c.Store == nil || user == nil {
+		return
+	}
+	isMuted, muteUntil, status := extractBanFields(user)
+	if err := c.Store.UpdateAccountBanStatus(acc.Identifier(), isMuted, muteUntil, status); err != nil {
+		config.Logger.Warn("[login] persist ban status failed", "account", acc.Identifier(), "error", err)
+	}
+}
+
+func extractBanFields(user map[string]any) (isMuted int, muteUntil float64, status int) {
+	if chat, ok := user["chat"].(map[string]any); ok {
+		isMuted = intFrom(chat["is_muted"])
+		if v, ok := chat["mute_until"].(float64); ok {
+			muteUntil = v
+		}
+	}
+	status = intFrom(user["status"])
+	return
 }
 
 func (c *Client) ensureAccountDeviceID(acc config.Account) (string, error) {
@@ -195,15 +217,31 @@ func (c *Client) CreateSession(ctx context.Context, a *auth.RequestAuth, maxAtte
 		}
 		if ch := DetectCaptchaChallenge(resp); ch != nil {
 			config.Logger.Warn("[create_session] captcha challenge detected, account should be cooled down", "account", a.AccountID, "instruction", ch.Instruction, "image_url", ch.ImageURL, "rid", ch.Rid)
-			if a.UseConfigToken && c.Auth.SwitchAccount(ctx, a) {
-				refreshed = false
-				attempts++
-				continue
+			if a.UseConfigToken {
+				if c.Auth != nil {
+					c.Auth.RecheckBan(ctx, a)
+				}
+				if c.Auth.SwitchAccount(ctx, a) {
+					refreshed = false
+					attempts++
+					continue
+				}
 			}
 			return "", &RequestFailure{Op: "create session", Kind: FailureCaptchaRequired, Message: failureMessage(msg, bizMsg, "captcha challenge required")}
 		}
 		config.Logger.Warn("[create_session] failed", "status", status, "code", code, "biz_code", bizCode, "msg", msg, "biz_msg", bizMsg, "use_config_token", a.UseConfigToken, "account", a.AccountID)
 		if a.UseConfigToken {
+			if shouldRecheckBan(status, code, bizCode, msg, bizMsg, false) {
+				if c.Auth != nil {
+					_, rechecked := c.Auth.RecheckBan(ctx, a)
+					if rechecked && shouldAttemptRefresh(status, code, bizCode, msg, bizMsg) {
+						// Token was already refreshed by RecheckBan; skip
+						// the explicit token refresh below to avoid a
+						// redundant login.
+						refreshed = true
+					}
+				}
+			}
 			if !refreshed && shouldAttemptRefresh(status, code, bizCode, msg, bizMsg) {
 				if c.Auth.RefreshToken(ctx, a) {
 					refreshed = true
@@ -276,10 +314,15 @@ func (c *Client) GetPowForTarget(ctx context.Context, a *auth.RequestAuth, targe
 			config.Logger.Warn("[get_pow] captcha challenge detected, account should be cooled down", "account", a.AccountID, "target_path", targetPath, "instruction", ch.Instruction, "image_url", ch.ImageURL, "rid", ch.Rid)
 			lastFailureKind = FailureCaptchaRequired
 			lastFailureMessage = failureMessage(msg, bizMsg, "captcha challenge required")
-			if a.UseConfigToken && c.Auth.SwitchAccount(ctx, a) {
-				refreshed = false
-				attempts++
-				continue
+			if a.UseConfigToken {
+				if c.Auth != nil {
+					c.Auth.RecheckBan(ctx, a)
+				}
+				if c.Auth.SwitchAccount(ctx, a) {
+					refreshed = false
+					attempts++
+					continue
+				}
 			}
 			attempts++
 			continue
@@ -292,6 +335,14 @@ func (c *Client) GetPowForTarget(ctx context.Context, a *auth.RequestAuth, targe
 			lastFailureKind = FailureUnknown
 		}
 		if a.UseConfigToken {
+			if shouldRecheckBan(status, code, bizCode, msg, bizMsg, false) {
+				if c.Auth != nil {
+					_, rechecked := c.Auth.RecheckBan(ctx, a)
+					if rechecked && shouldAttemptRefresh(status, code, bizCode, msg, bizMsg) {
+						refreshed = true
+					}
+				}
+			}
 			if !refreshed && shouldAttemptRefresh(status, code, bizCode, msg, bizMsg) {
 				if c.Auth.RefreshToken(ctx, a) {
 					refreshed = true
@@ -347,6 +398,18 @@ func shouldAttemptRefresh(status int, code int, bizCode int, msg string, bizMsg 
 		code == 0 &&
 		bizCode != 0 &&
 		isAuthIndicativeBizFailure(msg, bizMsg)
+}
+
+// shouldRecheckBan reports whether a rejected request (captcha / 429 / auth
+// failure) should trigger a ban re-check via a fresh login.
+func shouldRecheckBan(status int, code int, bizCode int, msg string, bizMsg string, captcha bool) bool {
+	if captcha {
+		return true
+	}
+	if status == http.StatusTooManyRequests {
+		return true
+	}
+	return isTokenInvalid(status, code, bizCode, msg, bizMsg)
 }
 
 func isAuthIndicativeBizFailure(msg string, bizMsg string) bool {

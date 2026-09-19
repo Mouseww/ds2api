@@ -19,8 +19,16 @@ type ctxKey string
 const authCtxKey ctxKey = "auth_context"
 
 var (
-	ErrUnauthorized = errors.New("unauthorized: missing auth token")
-	ErrNoAccount    = errors.New("no accounts configured or all accounts are busy")
+	ErrUnauthorized  = errors.New("unauthorized: missing auth token")
+	ErrNoAccount     = errors.New("no accounts configured or all accounts are busy")
+	errAccountBanned = errors.New("account is muted/banned by DeepSeek")
+)
+
+const (
+	// banRecheckCooldown is the minimum interval between ban re-check logins
+	// for the same account. This prevents login storms when a request is
+	// repeatedly rejected.
+	banRecheckCooldown = 60 * time.Second
 )
 
 type RequestAuth struct {
@@ -45,6 +53,7 @@ type Resolver struct {
 
 	mu               sync.Mutex
 	tokenRefreshedAt map[string]time.Time
+	banRecheckedAt   map[string]time.Time
 }
 
 func NewResolver(store *config.Store, pool *account.Pool, login LoginFunc) *Resolver {
@@ -53,6 +62,7 @@ func NewResolver(store *config.Store, pool *account.Pool, login LoginFunc) *Reso
 		Pool:             pool,
 		Login:            login,
 		tokenRefreshedAt: map[string]time.Time{},
+		banRecheckedAt:   map[string]time.Time{},
 	}
 }
 
@@ -156,9 +166,18 @@ func (r *Resolver) loginAndPersist(ctx context.Context, a *RequestAuth) error {
 	if err != nil {
 		return err
 	}
+	r.markTokenRefreshedNow(a.AccountID)
+	// The client persisted fresh ban fields during Login. If the account is
+	// muted, auto-disable it and clear the freshly-issued token so the request
+	// can fail over to another pooled account.
+	if acc, ok := r.Store.FindAccount(a.AccountID); ok && acc.IsBanned() {
+		a.Account.Token = ""
+		a.DeepSeekToken = ""
+		r.disableBannedAccount(a.AccountID, acc)
+		return errAccountBanned
+	}
 	a.Account.Token = token
 	a.DeepSeekToken = token
-	r.markTokenRefreshedNow(a.AccountID)
 	if err := r.Store.UpdateAccountToken(a.AccountID, token); err != nil {
 		return err
 	}
@@ -166,6 +185,73 @@ func (r *Resolver) loginAndPersist(ctx context.Context, a *RequestAuth) error {
 		r.PostLogin(ctx, a)
 	}
 	return nil
+}
+
+// RecheckBan re-logs-in to pull the latest ban status after a rejected request
+// (captcha / 429 / auth failure). It returns whether the account was found
+// banned (and thus auto-disabled) and whether a fresh token was obtained.
+// Re-checks are rate-limited by banRecheckCooldown.
+func (r *Resolver) RecheckBan(ctx context.Context, a *RequestAuth) (banned bool, refreshed bool) {
+	if r == nil || a == nil || !a.UseConfigToken || a.AccountID == "" {
+		return false, false
+	}
+	if !r.beginBanRecheck(a.AccountID) {
+		return false, false
+	}
+	if err := r.loginAndPersist(ctx, a); err != nil {
+		if errors.Is(err, errAccountBanned) {
+			return true, false
+		}
+		config.Logger.Warn("[ban_recheck] login failed", "account", a.AccountID, "error", err)
+		return false, false
+	}
+	return false, true
+}
+
+// disableBannedAccount marks the account disabled with reason "banned" and
+// evicts it from the pool. The persisted token is intentionally preserved
+// (per spec R3.4) so re-enabling the account later does not require a fresh
+// credential; only the in-memory token is cleared by the caller.
+func (r *Resolver) disableBannedAccount(accountID string, acc config.Account) {
+	if r.Store != nil {
+		_ = r.Store.Update(func(c *config.Config) error {
+			for i := range c.Accounts {
+				if c.Accounts[i].Identifier() != accountID {
+					continue
+				}
+				disabled := false
+				c.Accounts[i].Enabled = &disabled
+				c.Accounts[i].DisabledReason = "banned"
+				return nil
+			}
+			return nil
+		})
+	}
+	if r.Pool != nil {
+		r.Pool.RemoveAccount(accountID)
+	}
+	config.Logger.Warn(
+		"[ban_detect] account banned and auto-disabled",
+		"account", accountID,
+		"ban_is_muted", acc.BanIsMuted,
+		"ban_mute_until", acc.BanMuteUntil,
+		"ban_status", acc.BanStatus,
+	)
+}
+
+func (r *Resolver) beginBanRecheck(accountID string) bool {
+	if strings.TrimSpace(accountID) == "" {
+		return false
+	}
+	now := time.Now()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	last, ok := r.banRecheckedAt[accountID]
+	if ok && now.Sub(last) < banRecheckCooldown {
+		return false
+	}
+	r.banRecheckedAt[accountID] = now
+	return true
 }
 
 func (r *Resolver) RefreshToken(ctx context.Context, a *RequestAuth) bool {

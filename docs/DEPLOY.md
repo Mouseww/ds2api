@@ -113,11 +113,14 @@ cp config.example.json config.json
 # 拉取预编译镜像
 docker pull ghcr.io/cjackhwang/ds2api:latest
 
-# 复制环境变量模板和配置文件
-cp .env.example .env
-cp config.example.json config.json
+# （可选）复制环境变量模板和配置文件
+# - 缺少 .env 时不会阻塞启动：docker-compose.yml 的 env_file 已声明为
+#   required: false，environment 中的默认值（如 DS2API_ADMIN_KEY=ds2api）仍然生效；
+# - 缺少 config.json 时服务会自动以空的 file-backed 配置启动，并打印 WARN 告警。
+# cp .env.example .env
+# cp config.example.json config.json
 
-# 编辑 .env（请改成你的强密码），至少设置：
+# （可选）编辑 .env（请改成你的强密码），至少设置：
 #   DS2API_ADMIN_KEY=your-admin-key
 # 如需修改宿主机端口，可额外设置：
 #   DS2API_HOST_PORT=6011
@@ -132,6 +135,8 @@ docker-compose logs -f
 默认 `docker-compose.yml` 直接使用 `ghcr.io/ouqiting/ds2api:latest`，并把宿主机 `6011` 映射到容器内的 `5001`。如果你希望直接对外暴露 `5001`，请设置 `DS2API_HOST_PORT=5001`（或者手动调整 `ports` 配置）。
 Compose 模板还会默认设置 `DS2API_CONFIG_PATH=/data/config.json` 并挂载 `./config.json:/data/config.json`，优先避免 `/app` 只读带来的配置持久化问题。
 镜像内会预创建 `/data` 并授权给非 root 的 `ds2api` 用户；如果你使用 bind mount 单文件，请确保宿主机 `config.json` 至少可被容器用户读取/写入，例如 `chmod 644 config.json`，否则 Linux UID/GID 不一致时仍可能出现 `open /data/config.json: permission denied`。
+**单文件 bind mount 的目录陷阱**：如果宿主机 `config.json` 不存在，Docker 会把挂载源 `./config.json` 创建成**空目录**（而不是文件），容器内的 `/data/config.json` 因此是一个目录。修复后的版本不会再因此退出：服务识别到配置路径是目录时会以空的 file-backed 配置启动，并打印 `WARN` 日志，`reason` 字段给出可执行的修复指引——删除该目录并在宿主机创建配置文件（`rm -rf config.json && cp config.example.json config.json`），然后重启。
+**配置自举的语义边界**：只有「配置不可用」才会自举启动——配置文件不存在、配置路径是目录、配置文件对容器用户不可读（权限不足）；「配置内容错误」仍然致命并保持退出——JSON 非法（`json.Unmarshal` 失败）或 `ValidateConfig` 语义校验失败。自举启动使用空的 file-backed 配置，管理台第一次保存时会写入该文件。
 兼容说明：若未设置 `DS2API_CONFIG_PATH` 且运行目录是 `/app`，新版本会优先使用 `/data/config.json`；当该文件不存在但检测到历史 `/app/config.json` 时，会自动回退读取旧路径，避免升级后“配置丢失”。
 
 如需固定版本，也可以直接拉取指定 tag：
@@ -197,7 +202,7 @@ healthcheck:
 部署要点：
 
 - **端口**：服务默认监听 `5001`，模板会固定设置 `PORT=5001`。
-- **配置持久化**：模板挂载卷 `/data`，并设置 `DS2API_CONFIG_PATH=/data/config.json`；首次空卷启动时会先使用空的文件模式配置，在管理台导入配置后，会写入并持久化到该路径。
+- **配置持久化**：模板挂载卷 `/data`，并设置 `DS2API_CONFIG_PATH=/data/config.json`；首次空卷启动时该文件尚不存在，服务会以空的 file-backed 配置启动（日志为 `WARN` 级别，并说明自举原因），在管理台导入配置后，会写入并持久化到该路径。同样的自举也适用于另外两种「配置不可用」形态：配置路径被创建成目录、或配置文件对容器用户不可读；但配置文件**内容**非法（JSON 错误或语义校验失败）仍会导致启动失败。
 - **`open /app/config.json: permission denied`**：说明当前实例在尝试把运行时 token 持久化到只读路径（常见于镜像内 `/app`）。  
   处理建议：
   1. 显式设置可写路径：`DS2API_CONFIG_PATH=/data/config.json`（并挂载持久卷到 `/data`）；  
@@ -227,11 +232,11 @@ healthcheck:
 | `DS2API_ENV_WRITEBACK` | `1` | 可选；当设置了 `DS2API_CONFIG_JSON` 且希望首次启动后写入 `/data/config.json` 时再启用。 |
 
 7. 暴露 HTTP 端口 `5001`，健康检查路径可填 `/healthz`。
-8. 部署完成后访问 `/admin`，用 `DS2API_ADMIN_KEY` 登录，然后在管理台导入或编辑配置。首次空卷可以没有 `/data/config.json`，服务会先启动，第一次保存时自动创建该文件。
+8. 部署完成后访问 `/admin`，用 `DS2API_ADMIN_KEY` 登录，然后在管理台导入或编辑配置。首次空卷可以没有 `/data/config.json`：文件不存在、路径是目录、或文件不可读这三种情况都会以空的 file-backed 配置启动并打印 `WARN` 告警，服务会先启动，第一次保存时自动创建该文件；只有文件内容非法（JSON 错误/语义校验失败）才会启动失败。
 
 常见问题：
 
-- **启动日志出现 `open /data/config.json: no such file or directory`**：请确认已经部署包含“首次空卷启动”修复的版本，并重新部署最新代码。
+- **启动日志出现 `open /data/config.json: no such file or directory` 或 `read /data/config.json: is a directory`**：在包含“配置自举”修复的版本中，这两种情况都不会再让进程退出，而是以 `WARN` 日志 + 空的 file-backed 配置继续启动（`reason` 字段带有修复指引）。如果你看到的是 ERROR 级错误并伴随容器退出/重启，说明当前运行的是未包含本次修复的旧版本镜像，请重新部署最新代码。
 - **出现 `open /app/config.json: permission denied`**：说明配置路径仍指向镜像内只读目录；设置持久卷 `/data`，并确认 `DS2API_CONFIG_PATH=/data/config.json`。
 - **管理台保存后重启配置丢失**：检查 `/data` 持久卷是否已挂载到当前服务；如果使用了 `DS2API_CONFIG_JSON`，但想让管理台保存落盘，请启用 `DS2API_ENV_WRITEBACK=1`。
 

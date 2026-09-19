@@ -75,6 +75,13 @@ func parseSettingsUpdateRequest(req map[string]any) (*config.AdminConfig, *confi
 			}
 			cfg.TokenRefreshIntervalHours = n
 		}
+		if v, exists := raw["active_pool_size"]; exists {
+			n := intFrom(v)
+			if n < 0 {
+				return nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("runtime.active_pool_size must be >= 0")
+			}
+			cfg.ActivePoolSize = n
+		}
 		if cfg.AccountMaxInflight > 0 && cfg.GlobalMaxInflight > 0 && cfg.GlobalMaxInflight < cfg.AccountMaxInflight {
 			return nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("runtime.global_max_inflight must be >= runtime.account_max_inflight")
 		}

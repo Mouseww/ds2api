@@ -4,7 +4,12 @@ services:
     container_name: ds2api
     restart: always
     env_file:
-      - .env
+      # Optional: a fresh clone has no .env yet and Compose treats a missing
+      # env_file as a hard error, which blocked `docker compose up -d` before
+      # the first `cp .env.example .env`. Compose >= 2.24 supports
+      # `required: false`, so the defaults below still apply.
+      - path: .env
+        required: false
     ports:
       # Host port is configurable via DS2API_HOST_PORT; container port stays fixed at 5001.
       - "${DS2API_HOST_PORT:-6011}:5001"

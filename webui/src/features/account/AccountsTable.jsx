@@ -1,6 +1,12 @@
 import { useState } from 'react'
-import { ChevronLeft, ChevronRight, Check, Copy, Pencil, Play, Plus, Trash2, FolderX } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Check, Copy, Pencil, Play, Plus, Trash2, FolderX, ToggleLeft, ToggleRight, AlertTriangle } from 'lucide-react'
 import clsx from 'clsx'
+
+function formatUnbanTime(muteUntil) {
+    if (!muteUntil || muteUntil <= 0) return null
+    const date = new Date(muteUntil * 1000)
+    return date.toLocaleString()
+}
 
 export default function AccountsTable({
     t,
@@ -31,6 +37,8 @@ export default function AccountsTable({
     searchQuery,
     onSearchChange,
     envBacked = false,
+    onToggleEnabled,
+    togglingEnabled = {},
 }) {
     const [copiedId, setCopiedId] = useState(null)
 
@@ -109,17 +117,38 @@ export default function AccountsTable({
                         const assignedProxy = proxies.find(proxy => proxy.id === acc.proxy_id)
                         const runtimeUnknown = envBacked && !acc.test_status
                         const isActive = acc.test_status === 'ok' || acc.has_token
+                        const isBanned = acc.ban_is_muted === 1
+                        const isEnabled = acc.enabled !== false
+                        const unbanTime = formatUnbanTime(acc.ban_mute_until)
                         return (
-                            <div key={i} className="p-4 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-muted/50 transition-colors">
+                            <div key={i} className={clsx("p-4 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-muted/50 transition-colors", !isEnabled && "opacity-60")}>
                                 <div className="flex items-center gap-3 min-w-0">
                                     <div className={clsx(
                                         "w-2 h-2 rounded-full shrink-0",
+                                        isBanned ? "bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.7)]" :
                                         acc.test_status === 'failed' ? "bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.5)]" :
                                         isActive ? "bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]" :
                                         runtimeUnknown ? "bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.5)]" : "bg-amber-500"
                                     )} />
                                     <div className="min-w-0">
-                                        <div className="text-sm font-medium truncate">{acc.name || '-'}</div>
+                                        <div className="flex items-center gap-2">
+                                            <div className="text-sm font-medium truncate">{acc.name || '-'}</div>
+                                            {isBanned && (
+                                                <span className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-500/10 text-red-500 border border-red-500/20">
+                                                    <AlertTriangle className="w-3 h-3" /> {t('accountManager.banned')}
+                                                </span>
+                                            )}
+                                            {!isEnabled && !isBanned && acc.disabled_reason === 'manual' && (
+                                                <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-500/10 text-amber-500 border border-amber-500/20">
+                                                    {t('accountManager.disabledManual')}
+                                                </span>
+                                            )}
+                                            {!isEnabled && acc.disabled_reason === 'banned' && (
+                                                <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-500/10 text-red-500 border border-red-500/20">
+                                                    {t('accountManager.disabledByBan')}
+                                                </span>
+                                            )}
+                                        </div>
                                         <div
                                             className="font-medium truncate flex items-center gap-1.5 cursor-pointer hover:text-primary transition-colors group"
                                             onClick={() => copyId(id)}
@@ -132,6 +161,15 @@ export default function AccountsTable({
                                         </div>
                                         {acc.remark && (
                                             <div className="text-xs text-muted-foreground truncate mt-0.5">{acc.remark}</div>
+                                        )}
+                                        {isBanned && unbanTime && (
+                                            <div className="text-[10px] text-red-500 mt-0.5">{t('accountManager.unbanAt', { time: unbanTime })}</div>
+                                        )}
+                                        {isBanned && !unbanTime && (
+                                            <div className="text-[10px] text-red-500/60 mt-0.5">{t('accountManager.noUnbanTime')}</div>
+                                        )}
+                                        {acc.ban_status > 0 && (
+                                            <span className="text-[10px] text-muted-foreground mt-0.5">{t('accountManager.statusCode')}: {acc.ban_status}</span>
                                         )}
                                         <div className="flex items-center gap-2 text-xs text-muted-foreground mt-0.5">
                                             <span>{acc.test_status === 'failed' ? t('accountManager.testStatusFailed') : isActive ? t('accountManager.sessionActive') : runtimeUnknown ? t('accountManager.runtimeStatusUnknown') : t('accountManager.reauthRequired')}</span>
@@ -168,6 +206,19 @@ export default function AccountsTable({
                                     </div>
                                 </div>
                                 <div className="flex items-center gap-2 self-start lg:self-auto ml-5 lg:ml-0">
+                                    <button
+                                        onClick={() => onToggleEnabled && onToggleEnabled(id, !isEnabled)}
+                                        disabled={togglingEnabled[id] || !id}
+                                        className={clsx(
+                                            "p-1 lg:p-1.5 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed",
+                                            isEnabled
+                                                ? "text-emerald-500 hover:text-emerald-600 hover:bg-emerald-500/10"
+                                                : "text-muted-foreground hover:text-amber-500 hover:bg-amber-500/10"
+                                        )}
+                                        title={isEnabled ? t('accountManager.disableAccount') : t('accountManager.enableAccount')}
+                                    >
+                                        {isEnabled ? <ToggleRight className="w-4 h-4" /> : <ToggleLeft className="w-4 h-4" />}
+                                    </button>
                                     <select
                                         value={acc.proxy_id || ''}
                                         onChange={e => onUpdateAccountProxy(id, e.target.value)}

@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"slices"
 	"strings"
@@ -101,8 +102,8 @@ func loadConfig() (Config, bool, error) {
 			// Vercel may start without writable/present config; keep in-memory bootstrap config.
 			return Config{}, true, nil
 		}
-		if shouldBootstrapMissingConfigFile(err) {
-			Logger.Warn("[config] config file missing; starting with empty file-backed config", "path", path)
+		if reason, ok := configBootstrapReason(err, path); ok {
+			Logger.Warn("[config] config file unavailable; starting with empty file-backed config", "path", path, "reason", reason)
 			return Config{}, false, nil
 		}
 		return Config{}, false, err
@@ -114,8 +115,30 @@ func loadConfig() (Config, bool, error) {
 	return cfg, false, nil
 }
 
-func shouldBootstrapMissingConfigFile(err error) bool {
-	return errors.Is(err, os.ErrNotExist) && strings.TrimSpace(os.Getenv("DS2API_CONFIG_PATH")) != ""
+// configBootstrapReason reports whether a config load failure means the
+// configuration is unavailable rather than invalid, and returns an
+// operator-actionable reason for the warning log. Missing files, directory
+// paths (Docker creates an empty directory when a single-file bind mount
+// source is missing on the host) and unreadable files are safe to bootstrap as
+// an empty file-backed config. Content errors (invalid JSON, failed
+// validation) are not reported here so real misconfiguration stays fatal.
+func configBootstrapReason(err error, path string) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+	// Checking the path type keeps this platform-independent: reading a
+	// directory does not return os.ErrNotExist on any platform, and Windows
+	// does not surface syscall.EISDIR at all.
+	if st, statErr := os.Stat(path); statErr == nil && st.IsDir() {
+		return configPathDirectoryHint(path), true
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return fmt.Sprintf("config file %s does not exist; create it (for example `cp config.example.json config.json` on the host) or point DS2API_CONFIG_PATH at an existing file, then restart", path), true
+	}
+	if errors.Is(err, os.ErrPermission) {
+		return fmt.Sprintf("config file %s is not readable by the current user; fix its ownership/permissions (for example `chmod 644 config.json` on the host), then restart", path), true
+	}
+	return "", false
 }
 
 func loadConfigFromFile(path string) (Config, error) {
@@ -193,6 +216,38 @@ func (s *Store) AccountTestStatus(identifier string) (string, bool) {
 	defer s.mu.RUnlock()
 	status, ok := s.accTest[identifier]
 	return status, ok
+}
+
+func (s *Store) UpdateAccountBanStatus(identifier string, isMuted int, muteUntil float64, status int) error {
+	identifier = strings.TrimSpace(identifier)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx, ok := s.findAccountIndexLocked(identifier)
+	if !ok {
+		return errors.New("account not found")
+	}
+	s.cfg.Accounts[idx].BanIsMuted = isMuted
+	s.cfg.Accounts[idx].BanMuteUntil = muteUntil
+	s.cfg.Accounts[idx].BanStatus = status
+	return s.saveLocked()
+}
+
+// SetAccountEnabled toggles the enabled flag and optional disabled reason.
+func (s *Store) SetAccountEnabled(identifier string, enabled bool, reason string) error {
+	identifier = strings.TrimSpace(identifier)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx, ok := s.findAccountIndexLocked(identifier)
+	if !ok {
+		return errors.New("account not found")
+	}
+	s.cfg.Accounts[idx].Enabled = &enabled
+	if enabled {
+		s.cfg.Accounts[idx].DisabledReason = ""
+	} else {
+		s.cfg.Accounts[idx].DisabledReason = reason
+	}
+	return s.saveLocked()
 }
 
 func (s *Store) UpdateAccountToken(identifier, token string) error {

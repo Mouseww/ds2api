@@ -30,6 +30,9 @@ func ValidateConfig(c Config) error {
 	if err := ValidateAccountProxyReferences(c.Accounts, c.Proxies); err != nil {
 		return err
 	}
+	if err := ValidateActivePoolSize(c.Runtime.ActivePoolSize, len(c.Accounts)); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -99,6 +102,9 @@ func ValidateRuntimeConfig(runtime RuntimeConfig) error {
 	if runtime.AccountMaxInflight > 0 && runtime.GlobalMaxInflight > 0 && runtime.GlobalMaxInflight < runtime.AccountMaxInflight {
 		return fmt.Errorf("runtime.global_max_inflight must be >= runtime.account_max_inflight")
 	}
+	if runtime.ActivePoolSize < 0 {
+		return fmt.Errorf("runtime.active_pool_size must be >= 0")
+	}
 	return nil
 }
 
@@ -127,6 +133,18 @@ func ValidateIntRange(name string, value, min, max int, required bool) error {
 	}
 	if value < min || value > max {
 		return fmt.Errorf("%s must be between %d and %d", name, min, max)
+	}
+	return nil
+}
+
+// ValidateActivePoolSize checks the load-pool target size.
+// 0 means "use all eligible accounts" (default).
+// Negative values are rejected. Values exceeding the account count are
+// harmless — the pool's rebuildQueueLocked naturally caps the active set
+// to the number of eligible candidates.
+func ValidateActivePoolSize(activePoolSize, _ int) error {
+	if activePoolSize < 0 {
+		return fmt.Errorf("runtime.active_pool_size must be >= 0")
 	}
 	return nil
 }

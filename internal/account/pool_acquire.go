@@ -52,7 +52,7 @@ func (p *Pool) acquireLocked(target string, exclude map[string]bool) (config.Acc
 			return config.Account{}, false
 		}
 		acc, ok := p.store.FindAccount(target)
-		if !ok {
+		if !ok || !acc.IsEnabled() || acc.IsBanned() {
 			return config.Account{}, false
 		}
 		p.inUse[target]++
@@ -70,7 +70,7 @@ func (p *Pool) tryAcquire(exclude map[string]bool) (config.Account, bool) {
 			continue
 		}
 		acc, ok := p.store.FindAccount(id)
-		if !ok {
+		if !ok || !acc.IsEnabled() || acc.IsBanned() {
 			continue
 		}
 		p.inUse[id]++
