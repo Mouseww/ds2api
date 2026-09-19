@@ -99,6 +99,11 @@ func NewApp() (*App, error) {
 	r.Use(cors)
 	r.Use(requestbody.ValidateJSONUTF8)
 	r.Use(timeout(0))
+	// Serve the WebUI shell for browser refreshes and deep links before chi can
+	// match an Admin API route registered on the same path: a hard refresh on
+	// /admin/accounts used to reach GET /admin/accounts and answer 401 JSON,
+	// even though the session was still valid.
+	r.Use(webuiHandler.AdminDocumentShell)
 
 	healthzHandler := func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
