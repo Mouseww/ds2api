@@ -74,10 +74,34 @@ func TestPoolStatusFields(t *testing.T) {
 	status := pool.Status()
 
 	// Check all expected fields are present
-	for _, key := range []string{"total", "available", "max_inflight_per_account", "recommended_concurrency", "available_accounts", "in_use_accounts", "waiting", "max_queue_size"} {
+	for _, key := range []string{"total", "available", "max_inflight_per_account", "recommended_concurrency", "available_accounts", "in_use_accounts", "active_pool_accounts", "waiting", "max_queue_size"} {
 		if _, ok := status[key]; !ok {
 			t.Fatalf("missing status field: %s", key)
 		}
+	}
+}
+
+func TestPoolStatusActivePoolAccounts(t *testing.T) {
+	t.Setenv("DS2API_CONFIG_JSON", `{
+		"keys":["k1"],
+		"runtime": {"active_pool_size": 1},
+		"accounts":[
+			{"email":"acc1@example.com","token":"t1"},
+			{"email":"acc2@example.com","token":"t2"},
+			{"email":"acc3@example.com","token":"t3"}
+		]
+	}`)
+	pool := NewPool(config.LoadStore())
+	status := pool.Status()
+	members, ok := status["active_pool_accounts"].([]string)
+	if !ok {
+		t.Fatalf("unexpected active_pool_accounts type: %T", status["active_pool_accounts"])
+	}
+	if len(members) != 1 || members[0] != "acc1@example.com" {
+		t.Fatalf("expected only acc1 in active pool, got %v", members)
+	}
+	if count, ok := status["active_pool_count"].(int); !ok || count != 1 {
+		t.Fatalf("unexpected active_pool_count: %#v", status["active_pool_count"])
 	}
 }
 

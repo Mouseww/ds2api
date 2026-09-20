@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { ChevronLeft, ChevronRight, Check, Copy, Pencil, Play, Plus, Trash2, FolderX, ToggleLeft, ToggleRight, AlertTriangle } from 'lucide-react'
+import { useMemo, useState } from 'react'
+import { ChevronLeft, ChevronRight, Check, Copy, Pencil, Play, Plus, Trash2, FolderX, ToggleLeft, ToggleRight, AlertTriangle, X, ListFilter } from 'lucide-react'
 import clsx from 'clsx'
 
 function formatUnbanTime(muteUntil) {
@@ -27,6 +27,7 @@ export default function AccountsTable({
     deletingSessions,
     updatingProxy,
     totalAccounts,
+    quotaWindowHours = 24,
     page,
     pageSize,
     totalPages,
@@ -44,11 +45,24 @@ export default function AccountsTable({
     onPageSizeChange,
     searchQuery,
     onSearchChange,
+    filters,
+    onFilterChange,
+    onResetFilters,
+    sortKey,
+    sortOrder,
+    onSortChange,
+    onBatchDelete,
+    onBatchEnable,
+    onBatchDisable,
+    onBatchProxy,
+    batchOperating = false,
     envBacked = false,
     onToggleEnabled,
     togglingEnabled = {},
 }) {
     const [copiedId, setCopiedId] = useState(null)
+    const [selected, setSelected] = useState(() => new Set())
+    const [batchProxyId, setBatchProxyId] = useState('')
 
     const copyId = (id) => {
         navigator.clipboard.writeText(id).then(() => {
@@ -56,6 +70,76 @@ export default function AccountsTable({
             setTimeout(() => setCopiedId(null), 1500)
         })
     }
+
+    const pageIds = useMemo(
+        () => accounts.map(acc => resolveAccountIdentifier(acc)).filter(Boolean),
+        [accounts, resolveAccountIdentifier],
+    )
+    const selectedOnPage = pageIds.filter(id => selected.has(id))
+    const allOnPageSelected = pageIds.length > 0 && selectedOnPage.length === pageIds.length
+    const someOnPageSelected = selectedOnPage.length > 0 && !allOnPageSelected
+    const selectedIds = useMemo(() => Array.from(selected), [selected])
+
+    const toggleSelected = (id) => {
+        setSelected(prev => {
+            const next = new Set(prev)
+            if (next.has(id)) {
+                next.delete(id)
+            } else {
+                next.add(id)
+            }
+            return next
+        })
+    }
+
+    const toggleSelectAllOnPage = () => {
+        setSelected(prev => {
+            const next = new Set(prev)
+            if (allOnPageSelected) {
+                for (const id of pageIds) next.delete(id)
+            } else {
+                for (const id of pageIds) next.add(id)
+            }
+            return next
+        })
+    }
+
+    const clearSelection = () => setSelected(new Set())
+
+    const runBatchAction = async (fn, ids) => {
+        const ok = await fn(ids)
+        if (ok) clearSelection()
+    }
+
+    const hasActiveFilter = filters && Object.values(filters).some(value => value && value !== 'all')
+
+    const filterSelect = (key, label, options) => (
+        <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <span className="whitespace-nowrap">{label}</span>
+            <select
+                value={filters?.[key] || 'all'}
+                onChange={e => onFilterChange(key, e.target.value)}
+                className="px-2 py-1 text-xs bg-muted border border-border rounded-md focus:outline-none focus:ring-1 focus:ring-ring"
+            >
+                {options.map(([value, text]) => (
+                    <option key={value} value={value}>{text}</option>
+                ))}
+            </select>
+        </label>
+    )
+
+    const sortOptions = [
+        ['default', t('accountManager.sortDefault')],
+        ['usage_tokens', t('accountManager.sortUsageTokens')],
+        ['usage_requests', t('accountManager.sortUsageRequests')],
+        ['usage_today_tokens', t('accountManager.sortTodayTokens')],
+        ['usage_today_requests', t('accountManager.sortTodayRequests')],
+        ['test_status', t('accountManager.sortTestStatus')],
+        ['enabled', t('accountManager.sortEnabled')],
+        ['name', t('accountManager.sortName')],
+        ['identifier', t('accountManager.sortIdentifier')],
+    ]
+
     return (
         <div className="bg-card border border-border rounded-xl overflow-hidden shadow-sm">
             <div className="p-6 border-b border-border flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -89,6 +173,139 @@ export default function AccountsTable({
                 </div>
             </div>
 
+            <div className="p-4 border-b border-border bg-muted/30 flex flex-wrap items-center gap-x-4 gap-y-2">
+                <span className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+                    <ListFilter className="w-3.5 h-3.5" />
+                    {t('accountManager.filterSortLabel')}
+                </span>
+                {filterSelect('enabled', t('accountManager.filterEnabledLabel'), [
+                    ['all', t('accountManager.filterAll')],
+                    ['true', t('accountManager.filterEnabledOnly')],
+                    ['false', t('accountManager.filterDisabledOnly')],
+                ])}
+                {filterSelect('test_status', t('accountManager.filterTestStatusLabel'), [
+                    ['all', t('accountManager.filterAll')],
+                    ['ok', t('accountManager.filterTestOk')],
+                    ['failed', t('accountManager.filterTestFailed')],
+                    ['unknown', t('accountManager.filterTestUnknown')],
+                ])}
+                {filterSelect('banned', t('accountManager.filterBannedLabel'), [
+                    ['all', t('accountManager.filterAll')],
+                    ['true', t('accountManager.filterBannedOnly')],
+                    ['false', t('accountManager.filterNotBanned')],
+                ])}
+                {filterSelect('daily_limited', t('accountManager.filterDailyLimitedLabel'), [
+                    ['all', t('accountManager.filterAll')],
+                    ['true', t('accountManager.filterDailyLimitedOnly')],
+                    ['false', t('accountManager.filterNotDailyLimited')],
+                ])}
+                {filterSelect('has_proxy', t('accountManager.filterProxyLabel'), [
+                    ['all', t('accountManager.filterAll')],
+                    ['true', t('accountManager.filterHasProxy')],
+                    ['false', t('accountManager.filterNoProxy')],
+                ])}
+                {filterSelect('in_pool', t('accountManager.filterPoolLabel'), [
+                    ['all', t('accountManager.filterAll')],
+                    ['true', t('accountManager.filterInPool')],
+                    ['false', t('accountManager.filterNotInPool')],
+                ])}
+                <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <span className="whitespace-nowrap">{t('accountManager.sortLabel')}</span>
+                    <select
+                        value={sortKey || 'default'}
+                        onChange={e => onSortChange(e.target.value, sortOrder)}
+                        className="px-2 py-1 text-xs bg-muted border border-border rounded-md focus:outline-none focus:ring-1 focus:ring-ring"
+                    >
+                        {sortOptions.map(([value, text]) => (
+                            <option key={value} value={value}>{text}</option>
+                        ))}
+                    </select>
+                </label>
+                <label className={clsx(
+                    "flex items-center gap-1.5 text-xs text-muted-foreground",
+                    (!sortKey || sortKey === 'default') && "opacity-50 pointer-events-none",
+                )}>
+                    <span className="whitespace-nowrap">{t('accountManager.orderLabel')}</span>
+                    <select
+                        value={sortOrder || 'desc'}
+                        onChange={e => onSortChange(sortKey, e.target.value)}
+                        className="px-2 py-1 text-xs bg-muted border border-border rounded-md focus:outline-none focus:ring-1 focus:ring-ring"
+                    >
+                        <option value="desc">{t('accountManager.orderDesc')}</option>
+                        <option value="asc">{t('accountManager.orderAsc')}</option>
+                    </select>
+                </label>
+                {hasActiveFilter && (
+                    <button
+                        onClick={onResetFilters}
+                        className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground border border-border rounded-md hover:bg-secondary transition-colors"
+                    >
+                        <X className="w-3 h-3" />
+                        {t('accountManager.resetFilters')}
+                    </button>
+                )}
+            </div>
+
+            {selectedIds.length > 0 && (
+                <div className="p-3 border-b border-border bg-primary/5 flex flex-wrap items-center gap-2">
+                    <span className="text-sm font-medium">{t('accountManager.batchSelected', { count: selectedIds.length })}</span>
+                    <button
+                        onClick={() => runBatchAction(onBatchEnable, selectedIds)}
+                        disabled={batchOperating}
+                        className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium bg-emerald-500/10 text-emerald-600 border border-emerald-500/30 rounded-md hover:bg-emerald-500/20 transition-colors disabled:opacity-50"
+                    >
+                        <ToggleRight className="w-3.5 h-3.5" />
+                        {t('accountManager.batchEnable')}
+                    </button>
+                    <button
+                        onClick={() => runBatchAction(onBatchDisable, selectedIds)}
+                        disabled={batchOperating}
+                        className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium bg-amber-500/10 text-amber-600 border border-amber-500/30 rounded-md hover:bg-amber-500/20 transition-colors disabled:opacity-50"
+                    >
+                        <ToggleLeft className="w-3.5 h-3.5" />
+                        {t('accountManager.batchDisable')}
+                    </button>
+                    <span className="flex items-center gap-1.5">
+                        <select
+                            value={batchProxyId}
+                            onChange={e => setBatchProxyId(e.target.value)}
+                            disabled={batchOperating}
+                            className="max-w-[180px] px-2.5 py-1.5 text-xs bg-secondary border border-border rounded-md focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
+                        >
+                            <option value="">{t('accountManager.proxyNone')}</option>
+                            {proxies.map(proxy => (
+                                <option key={proxy.id} value={proxy.id}>
+                                    {proxy.name || `${proxy.host}:${proxy.port}`}
+                                </option>
+                            ))}
+                        </select>
+                        <button
+                            onClick={() => runBatchAction(ids => onBatchProxy(ids, batchProxyId), selectedIds)}
+                            disabled={batchOperating}
+                            className="px-3 py-1.5 text-xs font-medium bg-secondary text-secondary-foreground border border-border rounded-md hover:bg-secondary/80 transition-colors disabled:opacity-50"
+                        >
+                            {t('accountManager.batchSetProxy')}
+                        </button>
+                    </span>
+                    <button
+                        onClick={() => runBatchAction(onBatchDelete, selectedIds)}
+                        disabled={batchOperating}
+                        className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium bg-destructive/10 text-destructive border border-destructive/30 rounded-md hover:bg-destructive/20 transition-colors disabled:opacity-50"
+                    >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        {t('accountManager.batchDelete')}
+                    </button>
+                    <button
+                        onClick={clearSelection}
+                        disabled={batchOperating}
+                        className="flex items-center gap-1 px-2 py-1.5 text-xs text-muted-foreground hover:text-foreground rounded-md hover:bg-secondary transition-colors disabled:opacity-50"
+                    >
+                        <X className="w-3 h-3" />
+                        {t('accountManager.clearSelection')}
+                    </button>
+                </div>
+            )}
+
             {testingAll && batchProgress.total > 0 && (
                 <div className="p-4 border-b border-border bg-muted/30">
                     <div className="flex items-center justify-between text-sm mb-2">
@@ -117,6 +334,28 @@ export default function AccountsTable({
                 </div>
             )}
 
+            {accounts.length > 0 && !loadingAccounts && (
+                <div className="px-4 py-2 border-b border-border flex items-center gap-3 bg-muted/20">
+                    <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer select-none">
+                        <input
+                            type="checkbox"
+                            checked={allOnPageSelected}
+                            ref={el => {
+                                if (el) el.indeterminate = someOnPageSelected
+                            }}
+                            onChange={toggleSelectAllOnPage}
+                            className="w-4 h-4 accent-primary cursor-pointer"
+                        />
+                        {t('accountManager.selectAllOnPage')}
+                    </label>
+                    {selectedIds.length > 0 && (
+                        <span className="text-xs text-muted-foreground">
+                            {t('accountManager.batchSelected', { count: selectedIds.length })}
+                        </span>
+                    )}
+                </div>
+            )}
+
             <div className="divide-y divide-border">
                 {loadingAccounts ? (
                     <div className="p-8 text-center text-muted-foreground">{t('actions.loading')}</div>
@@ -132,6 +371,13 @@ export default function AccountsTable({
                         return (
                             <div key={i} className={clsx("p-4 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-muted/50 transition-colors", !isEnabled && "opacity-60")}>
                                 <div className="flex items-center gap-3 min-w-0">
+                                    <input
+                                        type="checkbox"
+                                        checked={Boolean(id) && selected.has(id)}
+                                        onChange={() => toggleSelected(id)}
+                                        disabled={!id}
+                                        className="w-4 h-4 accent-primary shrink-0 cursor-pointer disabled:opacity-30"
+                                    />
                                     <div className={clsx(
                                         "w-2 h-2 rounded-full shrink-0",
                                         isBanned ? "bg-yellow-400 shadow-[0_0_8px_rgba(250,204,21,0.7)]" :
@@ -142,6 +388,11 @@ export default function AccountsTable({
                                     <div className="min-w-0">
                                         <div className="flex items-center gap-2">
                                             <div className="text-sm font-medium truncate">{acc.name || '-'}</div>
+                                            {acc.in_pool && (
+                                                <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-emerald-500/10 text-emerald-500 border border-emerald-500/20" title={t('accountManager.inPoolBadgeTitle')}>
+                                                    {t('accountManager.inPoolBadge')}
+                                                </span>
+                                            )}
                                             {isBanned && (
                                                 <span className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-yellow-400/10 text-yellow-600 border border-yellow-400/30">
                                                     <AlertTriangle className="w-3 h-3" /> {t('accountManager.banned')}
@@ -180,7 +431,7 @@ export default function AccountsTable({
                                         {acc.ban_status > 0 && (
                                             <span className="text-[10px] text-muted-foreground mt-0.5">{t('accountManager.statusCode')}: {acc.ban_status}</span>
                                         )}
-                                        <div className="flex items-center gap-2 text-xs text-muted-foreground mt-0.5">
+                                        <div className="flex items-center gap-2 text-xs text-muted-foreground mt-0.5 flex-wrap">
                                             <span>{acc.test_status === 'failed' ? t('accountManager.testStatusFailed') : isActive ? t('accountManager.sessionActive') : runtimeUnknown ? t('accountManager.runtimeStatusUnknown') : t('accountManager.reauthRequired')}</span>
                                             {acc.token_preview && (
                                                 <span className="font-mono bg-muted px-1.5 py-0.5 rounded text-[10px]">
@@ -206,14 +457,16 @@ export default function AccountsTable({
                                                             ? "bg-yellow-400/10 text-yellow-600 border-yellow-400/30"
                                                             : "bg-muted text-muted-foreground border-border"
                                                     )}
-                                                    title={t('accountManager.usageTodayTitle', {
+                                                    title={t('accountManager.usageWindowTitle', {
+                                                        hours: quotaWindowHours,
                                                         tokens: formatTokens(acc.usage_today_tokens || 0),
                                                         tokenLimit: acc.daily_token_limit > 0 ? formatTokens(acc.daily_token_limit) : '-',
                                                         requests: acc.usage_today_requests || 0,
                                                         requestLimit: acc.daily_request_limit > 0 ? acc.daily_request_limit : '-',
                                                     })}
                                                 >
-                                                    {t('accountManager.usageToday', {
+                                                    {t('accountManager.usageWindow', {
+                                                        hours: quotaWindowHours,
                                                         tokens: formatTokens(acc.usage_today_tokens || 0),
                                                         requests: acc.usage_today_requests || 0,
                                                     })}
@@ -299,7 +552,7 @@ export default function AccountsTable({
                         )
                     })
                 ) : (
-                    <div className="p-8 text-center text-muted-foreground">{searchQuery ? t('accountManager.searchNoResults') : t('accountManager.noAccounts')}</div>
+                    <div className="p-8 text-center text-muted-foreground">{searchQuery || hasActiveFilter ? t('accountManager.searchNoResults') : t('accountManager.noAccounts')}</div>
                 )}
             </div>
 

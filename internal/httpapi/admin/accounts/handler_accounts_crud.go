@@ -13,95 +13,6 @@ import (
 	"ds2api/internal/usagestats"
 )
 
-func (h *Handler) listAccounts(w http.ResponseWriter, r *http.Request) {
-	page := intFromQuery(r, "page", 1)
-	pageSize := intFromQuery(r, "page_size", 10)
-	if page < 1 {
-		page = 1
-	}
-	if pageSize < 1 {
-		pageSize = 1
-	}
-	if pageSize > 5000 {
-		pageSize = 5000
-	}
-	snap := h.Store.Snapshot()
-	accounts := snap.Accounts
-	reverseAccounts(accounts)
-	q := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("q")))
-	if q != "" {
-		filtered := make([]config.Account, 0, len(accounts))
-		for _, acc := range accounts {
-			id := strings.ToLower(acc.Identifier())
-			if strings.Contains(id, q) ||
-				strings.Contains(strings.ToLower(acc.Name), q) ||
-				strings.Contains(strings.ToLower(acc.Remark), q) ||
-				strings.Contains(strings.ToLower(acc.Email), q) ||
-				strings.Contains(strings.ToLower(acc.Mobile), q) {
-				filtered = append(filtered, acc)
-			}
-		}
-		accounts = filtered
-	}
-	total := len(accounts)
-	totalPages := 1
-	if total > 0 {
-		totalPages = (total + pageSize - 1) / pageSize
-	}
-	start := (page - 1) * pageSize
-	if start > total {
-		start = total
-	}
-	end := start + pageSize
-	if end > total {
-		end = total
-	}
-	items := make([]map[string]any, 0, end-start)
-	usageByAccount := map[string]usagestats.AccountUsage{}
-	dailyByAccount := map[string]usagestats.AccountUsage{}
-	if h.UsageStats != nil {
-		usageByAccount = h.UsageStats.AllAccountUsage()
-		dailyByAccount = h.UsageStats.AccountDailyUsage()
-	}
-	// The global per-account daily quota is enforced by the pool; the list only
-	// reports it so an operator can see which accounts are near their budget.
-	tokenLimit := snap.Runtime.DailyTokenLimit()
-	requestLimit := int64(snap.Runtime.DailyRequestLimit)
-	for _, acc := range accounts[start:end] {
-		testStatus, _ := h.Store.AccountTestStatus(acc.Identifier())
-		token := strings.TrimSpace(acc.Token)
-		usage := usageByAccount[acc.Identifier()]
-		today := dailyByAccount[acc.Identifier()]
-		items = append(items, map[string]any{
-			"identifier":              acc.Identifier(),
-			"name":                    acc.Name,
-			"remark":                  acc.Remark,
-			"email":                   acc.Email,
-			"mobile":                  acc.Mobile,
-			"proxy_id":                acc.ProxyID,
-			"has_password":            acc.Password != "",
-			"has_token":               token != "",
-			"token_preview":           maskSecretPreview(token),
-			"test_status":             testStatus,
-			"enabled":                 acc.IsEnabled(),
-			"disabled_reason":         acc.DisabledReason,
-			"ban_is_muted":            acc.BanIsMuted,
-			"ban_mute_until":          acc.BanMuteUntil,
-			"ban_status":              acc.BanStatus,
-			"usage_requests":          usage.Requests,
-			"usage_prompt_tokens":     usage.PromptTokens,
-			"usage_completion_tokens": usage.CompletionTokens,
-			"usage_total_tokens":      usage.TotalTokens,
-			"usage_today_requests":    today.Requests,
-			"usage_today_tokens":      today.TotalTokens,
-			"daily_token_limit":       tokenLimit,
-			"daily_request_limit":     requestLimit,
-			"daily_limited":           dailyLimitReached(today, tokenLimit, requestLimit),
-		})
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "page": page, "page_size": pageSize, "total_pages": totalPages})
-}
-
 func (h *Handler) addAccount(w http.ResponseWriter, r *http.Request) {
 	var req map[string]any
 	_ = json.NewDecoder(r.Body).Decode(&req)
@@ -230,13 +141,13 @@ func fieldBool(m map[string]any, key string) (bool, bool) {
 	}
 }
 
-// dailyLimitReached reports whether today's usage has hit either configured
-// per-account daily budget. A zero limit disables that metric.
-func dailyLimitReached(today usagestats.AccountUsage, tokenLimit, requestLimit int64) bool {
-	if tokenLimit > 0 && today.TotalTokens >= tokenLimit {
+// dailyLimitReached reports whether the quota-window usage has hit either
+// configured per-account budget. A zero limit disables that metric.
+func dailyLimitReached(windowUsage usagestats.AccountUsage, tokenLimit, requestLimit int64) bool {
+	if tokenLimit > 0 && windowUsage.TotalTokens >= tokenLimit {
 		return true
 	}
-	if requestLimit > 0 && today.Requests >= requestLimit {
+	if requestLimit > 0 && windowUsage.Requests >= requestLimit {
 		return true
 	}
 	return false

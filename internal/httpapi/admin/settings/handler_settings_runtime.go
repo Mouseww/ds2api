@@ -23,6 +23,9 @@ func validateMergedRuntimeSettings(current config.RuntimeConfig, incoming *confi
 		if incoming.DailyRequestLimit > 0 {
 			merged.DailyRequestLimit = incoming.DailyRequestLimit
 		}
+		if incoming.QuotaWindowHours > 0 {
+			merged.QuotaWindowHours = incoming.QuotaWindowHours
+		}
 	}
 	return validateRuntimeSettings(merged)
 }

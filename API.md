@@ -147,11 +147,14 @@ Gemini 兼容客户端还可以使用 `x-goog-api-key`、`?key=` 或 `?api_key=`
 | PUT | `/admin/proxies/{proxyID}` | Admin | 更新代理（留空 password 表示保留原密码） |
 | DELETE | `/admin/proxies/{proxyID}` | Admin | 删除代理（自动解绑引用该代理的账号） |
 | POST | `/admin/proxies/test` | Admin | 测试代理连通性 |
-| GET | `/admin/accounts` | Admin | 分页账号列表 |
+| GET | `/admin/accounts` | Admin | 分页账号列表（支持筛选/排序） |
 | POST | `/admin/accounts` | Admin | 添加账号 |
 | PUT | `/admin/accounts/{identifier}` | Admin | 更新账号 name/remark |
 | DELETE | `/admin/accounts/{identifier}` | Admin | 删除账号 |
 | PUT | `/admin/accounts/{identifier}/proxy` | Admin | 为账号绑定/解绑代理 |
+| POST | `/admin/accounts/batch-delete` | Admin | 批量删除账号 |
+| POST | `/admin/accounts/batch-status` | Admin | 批量启用/禁用账号 |
+| POST | `/admin/accounts/batch-proxy` | Admin | 批量绑定/解绑代理 |
 | GET | `/admin/queue/status` | Admin | 账号队列状态 |
 | POST | `/admin/accounts/test` | Admin | 测试单个账号 |
 | POST | `/admin/accounts/test-all` | Admin | 测试全部账号 |
@@ -775,7 +778,7 @@ data: {"type":"message_stop"}
 
 - `success`
 - `admin`（`has_password_hash`、`jwt_expire_hours`、`jwt_valid_after_unix`、`default_password_warning`）
-- `runtime`（`account_max_inflight`、`account_max_queue`、`global_max_inflight`、`token_refresh_interval_hours`）
+- `runtime`（`account_max_inflight`、`account_max_queue`、`global_max_inflight`、`token_refresh_interval_hours`、`active_pool_size`、`daily_token_limit_m`、`daily_request_limit`、`quota_window_hours`）
 - `responses` / `embeddings`
 - `auto_delete`（`mode`：`none` / `single` / `all`；旧配置 `sessions=true` 仍按 `all` 处理）
 - `current_input_file`（`enabled` 默认返回 `false`、`min_chars`）
@@ -790,6 +793,7 @@ data: {"type":"message_stop"}
 
 - `admin.jwt_expire_hours`
 - `runtime.account_max_inflight` / `runtime.account_max_queue` / `runtime.global_max_inflight` / `runtime.token_refresh_interval_hours`
+- `runtime.daily_token_limit_m` / `runtime.daily_request_limit` / `runtime.quota_window_hours`（限额按过去 N 小时的滚动用量统计，0 = 默认 24 小时，范围 1–168）
 - `responses.store_ttl_seconds`
 - `embeddings.provider`
 - `auto_delete.mode`
@@ -882,7 +886,20 @@ data: {"type":"message_stop"}
 | --- | --- | --- |
 | `page` | `1` | ≥ 1 |
 | `page_size` | `10` | 1–5000 |
-| `q` | 空 | 按 identifier / email / mobile 过滤 |
+| `q` | 空 | 按 identifier / email / mobile / name / remark 过滤 |
+| `enabled` | `all` | `all` / `true` / `false`，按禁用状态筛选 |
+| `test_status` | `all` | `all` / `ok` / `failed` / `unknown`，按测试状态筛选 |
+| `banned` | `all` | `all` / `true` / `false`，按封禁状态筛选 |
+| `daily_limited` | `all` | `all` / `true` / `false`，按限额窗口内是否用尽额度筛选 |
+| `has_proxy` | `all` | `all` / `true` / `false`，按是否绑定代理筛选 |
+| `in_pool` | `all` | `all` / `true` / `false`，按是否在活跃池筛选 |
+| `sort` | `default` | `default` / `usage_tokens` / `usage_requests` / `usage_today_tokens` / `usage_today_requests` / `test_status` / `enabled` / `name` / `identifier` |
+| `order` | 按键而定 | `asc` / `desc`；`sort=default` 时忽略 |
+
+排序说明：
+
+- `default`（默认）：未禁用且在活跃池中的账号排在最前面，组内保持原有的最新优先顺序；
+- 其余键按对应字段排序，未指定 `order` 时数值/状态键默认降序、`name` / `identifier` 默认升序。
 
 **响应**：
 
@@ -896,15 +913,22 @@ data: {"type":"message_stop"}
       "has_password": true,
       "has_token": true,
       "token_preview": "abc...",
-      "test_status": "ok"
+      "test_status": "ok",
+      "in_pool": true,
+      "usage_today_tokens": 1200000,
+      "usage_today_requests": 34,
+      "daily_limited": false
     }
   ],
   "total": 25,
   "page": 1,
   "page_size": 10,
-  "total_pages": 3
+  "total_pages": 3,
+  "quota_window_hours": 24
 }
 ```
+
+`usage_today_tokens` / `usage_today_requests` 字段名保留兼容，语义为**限额统计窗口内**的滚动用量（默认 24 小时，见 `runtime.quota_window_hours`）；`daily_limited` 表示窗口内用量是否已达到任一限额。
 
 ### `POST /admin/accounts`
 
@@ -938,6 +962,50 @@ data: {"type":"message_stop"}
 - `proxy_id` 传空字符串时表示解绑代理；
 - `identifier` 支持 email / mobile / token-only 合成标识。
 
+### `POST /admin/accounts/batch-delete`
+
+批量删除账号。请求体：
+
+```json
+{"identifiers": ["a@example.com", "13800138000"]}
+```
+
+`identifiers` 支持 email / mobile / token-only 合成标识，最多 5000 个。响应：
+
+```json
+{"success": true, "deleted": 2, "missing": ["ghost@example.com"], "total_accounts": 3}
+```
+
+`missing` 列出没有匹配到账号的标识。
+
+### `POST /admin/accounts/batch-status`
+
+批量启用或禁用账号。请求体：
+
+```json
+{"identifiers": ["a@example.com"], "enabled": false}
+```
+
+语义与单个 `PUT /admin/accounts/{identifier}` 的 `enabled` 字段一致（禁用原因记为 `manual`）。响应：
+
+```json
+{"success": true, "updated": 1, "missing": [], "total_accounts": 3}
+```
+
+### `POST /admin/accounts/batch-proxy`
+
+批量为账号绑定/解绑代理。请求体：
+
+```json
+{"identifiers": ["a@example.com", "b@example.com"], "proxy_id": "proxy_xxx"}
+```
+
+`proxy_id` 传空字符串表示解绑；代理不存在时返回 400 且不做任何修改。响应：
+
+```json
+{"success": true, "updated": 2, "missing": [], "proxy_id": "proxy_xxx", "total_accounts": 3}
+```
+
 ### `GET /admin/queue/status`
 
 ```json
@@ -947,6 +1015,7 @@ data: {"type":"message_stop"}
   "total": 4,
   "available_accounts": ["a@example.com"],
   "in_use_accounts": ["b@example.com"],
+  "active_pool_accounts": ["a@example.com", "b@example.com"],
   "max_inflight_per_account": 2,
   "global_max_inflight": 8,
   "recommended_concurrency": 8,
@@ -962,6 +1031,7 @@ data: {"type":"message_stop"}
 | `total` | 总账号数 |
 | `available_accounts` | 仍有剩余并发槽位的账号 ID 列表 |
 | `in_use_accounts` | 当前处于使用中的账号 ID 列表 |
+| `active_pool_accounts` | 当前活跃池内的账号 ID 列表（启用且参与负载分配） |
 | `max_inflight_per_account` | 每账号并发上限 |
 | `global_max_inflight` | 全局并发上限 |
 | `recommended_concurrency` | 建议并发值（`total × max_inflight_per_account`） |

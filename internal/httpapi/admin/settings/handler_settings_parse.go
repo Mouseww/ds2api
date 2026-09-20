@@ -102,6 +102,14 @@ func parseSettingsUpdateRequest(req map[string]any) (*config.AdminConfig, *confi
 			}
 			cfg.DailyRequestLimit = n
 		}
+		if v, exists := raw["quota_window_hours"]; exists {
+			// 0 means the 24-hour default window, so it is always allowed.
+			n := intFrom(v)
+			if err := config.ValidateIntRange("runtime.quota_window_hours", n, 1, 168, false); err != nil {
+				return nil, nil, nil, nil, nil, nil, nil, nil, err
+			}
+			cfg.QuotaWindowHours = n
+		}
 		if cfg.AccountMaxInflight > 0 && cfg.GlobalMaxInflight > 0 && cfg.GlobalMaxInflight < cfg.AccountMaxInflight {
 			return nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("runtime.global_max_inflight must be >= runtime.account_max_inflight")
 		}

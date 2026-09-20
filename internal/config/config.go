@@ -178,12 +178,17 @@ type RuntimeConfig struct {
 	// ActivePoolSize is the target number of simultaneously-active accounts in
 	// the load pool. 0 means "use all eligible accounts" (the default).
 	ActivePoolSize int `json:"active_pool_size,omitempty"`
-	// DailyTokenLimitM is the global per-account daily token budget, expressed
+	// DailyTokenLimitM is the global per-account token budget, expressed
 	// in millions of tokens (m). 0 disables the token metric.
 	DailyTokenLimitM int `json:"daily_token_limit_m,omitempty"`
-	// DailyRequestLimit is the global per-account daily request budget.
+	// DailyRequestLimit is the global per-account request budget.
 	// 0 disables the request metric.
 	DailyRequestLimit int `json:"daily_request_limit,omitempty"`
+	// QuotaWindowHours is the rolling window, in hours, over which the
+	// per-account token/request budgets are counted. 0 means the 24-hour
+	// default. Usage that slides out of the window stops counting, so an
+	// account that hit its budget re-enters the rotation pool automatically.
+	QuotaWindowHours int `json:"quota_window_hours,omitempty"`
 }
 
 // DailyTokenLimit returns the per-account daily token budget in raw tokens.

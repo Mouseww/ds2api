@@ -67,10 +67,13 @@ func NewApp() (*App, error) {
 	if err := usageStats.Err(); err != nil {
 		config.Logger.Warn("[usage_stats] unavailable", "path", usageStats.Path(), "error", err)
 	}
-	// The pool enforces the global per-account daily quota, so it needs today's
-	// per-account usage from the stats store.
+	// The pool enforces the global per-account quota, so it needs each
+	// account's usage over the configured rolling window from the stats store.
+	// The window is read inside the closure so settings changes apply without
+	// re-wiring.
 	pool.SetDailyUsageProvider(func() map[string]account.DailyUsage {
-		raw := usageStats.AccountDailyUsage()
+		window := time.Duration(store.RuntimeQuotaWindowHours()) * time.Hour
+		raw := usageStats.AccountWindowUsage(window)
 		out := make(map[string]account.DailyUsage, len(raw))
 		for id, usage := range raw {
 			out[id] = account.DailyUsage{Requests: usage.Requests, TotalTokens: usage.TotalTokens}

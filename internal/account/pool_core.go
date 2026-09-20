@@ -21,8 +21,9 @@ type Pool struct {
 	globalMaxInflight      int
 	activePoolSize         int
 
-	// Daily quota enforcement: the provider reports per-account usage for the
-	// current local day, cached briefly so the acquire path stays cheap.
+	// Quota enforcement: the provider reports per-account usage for the
+	// configured rolling window, cached briefly so the acquire path stays
+	// cheap.
 	dailyUsageProvider DailyUsageProvider
 	dailyUsageCache    map[string]DailyUsage
 	dailyUsageCachedAt time.Time
@@ -140,10 +141,10 @@ func (p *Pool) rebuildQueueLocked() {
 }
 
 // eligibleAccountsLocked returns enabled, non-banned accounts that have not
-// exhausted their daily quota, in the existing stable token-first ordering.
-// Excluding over-quota accounts here is what makes a standby account take the
-// place of an active one that reached its daily limit. Must be called with p.mu
-// held.
+// exhausted their quota inside the configured window, in the existing stable
+// token-first ordering. Excluding over-quota accounts here is what makes a
+// standby account take the place of an active one that reached its limit.
+// Must be called with p.mu held.
 func (p *Pool) eligibleAccountsLocked() []config.Account {
 	var accounts []config.Account
 	if p.store != nil {
@@ -210,6 +211,8 @@ func (p *Pool) Status() map[string]any {
 	defer p.mu.Unlock()
 	available := make([]string, 0, len(p.queue))
 	inUseAccounts := make([]string, 0, len(p.inUse))
+	activePoolAccounts := make([]string, len(p.queue))
+	copy(activePoolAccounts, p.queue)
 	inUseSlots := 0
 	for _, id := range p.queue {
 		if p.inUse[id] < p.maxInflightPerAccount {
@@ -244,6 +247,7 @@ func (p *Pool) Status() map[string]any {
 		"total":                    total,
 		"available_accounts":       available,
 		"in_use_accounts":          inUseAccounts,
+		"active_pool_accounts":     activePoolAccounts,
 		"max_inflight_per_account": p.maxInflightPerAccount,
 		"global_max_inflight":      p.globalMaxInflight,
 		"recommended_concurrency":  p.recommendedConcurrency,

@@ -72,7 +72,23 @@ export default function RuntimeSection({ t, form, setForm }) {
                     />
                 </label>
                 <label className="text-sm space-y-2">
-                    <span className="text-muted-foreground">{t('settings.dailyTokenLimitM')}</span>
+                    <span className="text-muted-foreground">{t('settings.quotaWindowHours')}</span>
+                    <input
+                        type="number"
+                        min={0}
+                        max={168}
+                        step={1}
+                        value={form.runtime.quota_window_hours}
+                        onChange={(e) => setForm((prev) => ({
+                            ...prev,
+                            runtime: { ...prev.runtime, quota_window_hours: Number(e.target.value || 0) },
+                        }))}
+                        className="w-full bg-background border border-border rounded-lg px-3 py-2"
+                    />
+                    <span className="text-[10px] text-muted-foreground">{t('settings.quotaWindowHoursHelp')}</span>
+                </label>
+                <label className="text-sm space-y-2">
+                    <span className="text-muted-foreground">{t('settings.dailyTokenLimitM', { hours: form.runtime.quota_window_hours || 24 })}</span>
                     <input
                         type="number"
                         min={0}
@@ -83,10 +99,10 @@ export default function RuntimeSection({ t, form, setForm }) {
                         }))}
                         className="w-full bg-background border border-border rounded-lg px-3 py-2"
                     />
-                    <span className="text-[10px] text-muted-foreground">{t('settings.dailyTokenLimitMHelp')}</span>
+                    <span className="text-[10px] text-muted-foreground">{t('settings.dailyTokenLimitMHelp', { hours: form.runtime.quota_window_hours || 24 })}</span>
                 </label>
                 <label className="text-sm space-y-2">
-                    <span className="text-muted-foreground">{t('settings.dailyRequestLimit')}</span>
+                    <span className="text-muted-foreground">{t('settings.dailyRequestLimit', { hours: form.runtime.quota_window_hours || 24 })}</span>
                     <input
                         type="number"
                         min={0}
@@ -97,7 +113,7 @@ export default function RuntimeSection({ t, form, setForm }) {
                         }))}
                         className="w-full bg-background border border-border rounded-lg px-3 py-2"
                     />
-                    <span className="text-[10px] text-muted-foreground">{t('settings.dailyRequestLimitHelp')}</span>
+                    <span className="text-[10px] text-muted-foreground">{t('settings.dailyRequestLimitHelp', { hours: form.runtime.quota_window_hours || 24 })}</span>
                 </label>
             </div>
         </div>

@@ -22,11 +22,18 @@ export default function AccountManagerContainer({ config, onRefresh, onMessage, 
         totalPages,
         totalAccounts,
         loadingAccounts,
+        quotaWindowHours,
         fetchAccounts,
         changePageSize,
         resolveAccountIdentifier,
         searchQuery,
         handleSearchChange,
+        sortKey,
+        sortOrder,
+        changeSort,
+        filters,
+        changeFilter,
+        resetFilters,
     } = useAccountsData({ apiFetch })
 
     const {
@@ -68,6 +75,10 @@ export default function AccountManagerContainer({ config, onRefresh, onMessage, 
         deleteAllSessions,
         updateAccountProxy,
         toggleEnabled,
+        batchDeleteAccounts,
+        batchUpdateStatus,
+        batchUpdateProxy,
+        batchOperating,
     } = useAccountActions({
         apiFetch,
         t,
@@ -126,6 +137,7 @@ export default function AccountManagerContainer({ config, onRefresh, onMessage, 
                 deletingSessions={deletingSessions}
                 updatingProxy={updatingProxy}
                 totalAccounts={totalAccounts}
+                quotaWindowHours={quotaWindowHours}
                 page={page}
                 pageSize={pageSize}
                 totalPages={totalPages}
@@ -145,6 +157,17 @@ export default function AccountManagerContainer({ config, onRefresh, onMessage, 
                 onPageSizeChange={changePageSize}
                 searchQuery={searchQuery}
                 onSearchChange={handleSearchChange}
+                filters={filters}
+                onFilterChange={changeFilter}
+                onResetFilters={resetFilters}
+                sortKey={sortKey}
+                sortOrder={sortOrder}
+                onSortChange={changeSort}
+                onBatchDelete={batchDeleteAccounts}
+                onBatchEnable={ids => batchUpdateStatus(ids, true)}
+                onBatchDisable={ids => batchUpdateStatus(ids, false)}
+                onBatchProxy={batchUpdateProxy}
+                batchOperating={batchOperating}
                 envBacked={Boolean(config?.env_backed)}
             />
 

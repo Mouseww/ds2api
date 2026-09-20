@@ -18,6 +18,7 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, f
     const [deletingSessions, setDeletingSessions] = useState({})
     const [updatingProxy, setUpdatingProxy] = useState({})
     const [togglingEnabled, setTogglingEnabled] = useState({})
+    const [batchOperating, setBatchOperating] = useState(false)
 
     const openAddKey = () => {
         setEditingKey(null)
@@ -383,6 +384,105 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, f
         }
     }
 
+    const normalizeBatchIdentifiers = (identifiers) => {
+        return (identifiers || []).map(id => String(id || '').trim()).filter(Boolean)
+    }
+
+    const reportBatchResult = (data, appliedKey, successTemplate) => {
+        const missing = Array.isArray(data?.missing) ? data.missing : []
+        if (missing.length > 0) {
+            onMessage('warning', t('accountManager.batchPartialWarning', {
+                count: data[appliedKey] || 0,
+                missing: missing.join(', '),
+            }))
+            return
+        }
+        onMessage('success', t(successTemplate, { count: data[appliedKey] || 0 }))
+    }
+
+    const batchDeleteAccounts = async (identifiers) => {
+        const ids = normalizeBatchIdentifiers(identifiers)
+        if (ids.length === 0) return false
+        if (!confirm(t('accountManager.batchDeleteConfirm', { count: ids.length }))) return false
+        setBatchOperating(true)
+        try {
+            const res = await apiFetch('/admin/accounts/batch-delete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ identifiers: ids }),
+            })
+            const data = await res.json()
+            if (!res.ok) {
+                onMessage('error', data.detail || t('messages.deleteFailed'))
+                return false
+            }
+            reportBatchResult(data, 'deleted', 'accountManager.batchDeleteSuccess')
+            fetchAccounts()
+            onRefresh()
+            return true
+        } catch (_err) {
+            onMessage('error', t('messages.networkError'))
+            return false
+        } finally {
+            setBatchOperating(false)
+        }
+    }
+
+    const batchUpdateStatus = async (identifiers, enabled) => {
+        const ids = normalizeBatchIdentifiers(identifiers)
+        if (ids.length === 0) return false
+        if (!enabled && !confirm(t('accountManager.batchDisableConfirm', { count: ids.length }))) return false
+        setBatchOperating(true)
+        try {
+            const res = await apiFetch('/admin/accounts/batch-status', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ identifiers: ids, enabled }),
+            })
+            const data = await res.json()
+            if (!res.ok) {
+                onMessage('error', data.detail || t('accountManager.toggleAccountFailed'))
+                return false
+            }
+            reportBatchResult(data, 'updated', enabled ? 'accountManager.batchEnableSuccess' : 'accountManager.batchDisableSuccess')
+            fetchAccounts()
+            onRefresh()
+            return true
+        } catch (_err) {
+            onMessage('error', t('messages.networkError'))
+            return false
+        } finally {
+            setBatchOperating(false)
+        }
+    }
+
+    const batchUpdateProxy = async (identifiers, proxyID) => {
+        const ids = normalizeBatchIdentifiers(identifiers)
+        if (ids.length === 0) return false
+        setBatchOperating(true)
+        try {
+            const res = await apiFetch('/admin/accounts/batch-proxy', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ identifiers: ids, proxy_id: proxyID || '' }),
+            })
+            const data = await res.json()
+            if (!res.ok) {
+                onMessage('error', data.detail || t('messages.requestFailed'))
+                return false
+            }
+            reportBatchResult(data, 'updated', 'accountManager.batchProxySuccess')
+            fetchAccounts()
+            onRefresh()
+            return true
+        } catch (_err) {
+            onMessage('error', t('messages.networkError'))
+            return false
+        } finally {
+            setBatchOperating(false)
+        }
+    }
+
     return {
         showAddKey,
         openAddKey,
@@ -412,6 +512,7 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, f
         deletingSessions,
         updatingProxy,
         togglingEnabled,
+        batchOperating,
         addKey,
         deleteKey,
         addAccount,
@@ -422,5 +523,8 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, f
         deleteAllSessions,
         updateAccountProxy,
         toggleEnabled,
+        batchDeleteAccounts,
+        batchUpdateStatus,
+        batchUpdateProxy,
     }
 }

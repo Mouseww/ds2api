@@ -150,7 +150,7 @@ func (s *Store) RuntimeActivePoolSize() int {
 	return 0
 }
 
-// RuntimeDailyTokenLimitM reports the per-account daily token budget in
+// RuntimeDailyTokenLimitM reports the per-account token budget in
 // millions (m). 0 disables the metric.
 func (s *Store) RuntimeDailyTokenLimitM() int {
 	s.mu.RLock()
@@ -161,7 +161,7 @@ func (s *Store) RuntimeDailyTokenLimitM() int {
 	return 0
 }
 
-// RuntimeDailyRequestLimit reports the per-account daily request budget.
+// RuntimeDailyRequestLimit reports the per-account request budget.
 // 0 disables the metric.
 func (s *Store) RuntimeDailyRequestLimit() int {
 	s.mu.RLock()
@@ -170,6 +170,23 @@ func (s *Store) RuntimeDailyRequestLimit() int {
 		return s.cfg.Runtime.DailyRequestLimit
 	}
 	return 0
+}
+
+// RuntimeQuotaWindowHours reports the rolling window, in hours, over which
+// the per-account token/request budgets are counted. Unset (0) maps to the
+// 24-hour default; out-of-range values are clamped so a hand-edited config
+// cannot break the quota lookup.
+func (s *Store) RuntimeQuotaWindowHours() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	hours := s.cfg.Runtime.QuotaWindowHours
+	if hours <= 0 {
+		return 24
+	}
+	if hours > 168 {
+		return 168
+	}
+	return hours
 }
 
 // RuntimeDailyTokenLimit reports the per-account daily token budget in raw

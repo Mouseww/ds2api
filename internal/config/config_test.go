@@ -359,6 +359,56 @@ func TestRuntimeTokenRefreshIntervalHoursUsesConfigValue(t *testing.T) {
 	}
 }
 
+func TestRuntimeQuotaWindowHoursDefaultsToTwentyFour(t *testing.T) {
+	t.Setenv("DS2API_CONFIG_JSON", `{
+		"keys":["k1"],
+		"accounts":[{"email":"u@example.com","password":"p"}]
+	}`)
+
+	store := LoadStore()
+	if got := store.RuntimeQuotaWindowHours(); got != 24 {
+		t.Fatalf("expected default quota window 24, got %d", got)
+	}
+}
+
+func TestRuntimeQuotaWindowHoursUsesConfigValueAndClamps(t *testing.T) {
+	t.Setenv("DS2API_CONFIG_JSON", `{
+		"keys":["k1"],
+		"accounts":[{"email":"u@example.com","password":"p"}],
+		"runtime":{"quota_window_hours":6}
+	}`)
+
+	store := LoadStore()
+	if got := store.RuntimeQuotaWindowHours(); got != 6 {
+		t.Fatalf("expected configured quota window 6, got %d", got)
+	}
+
+	if err := store.Update(func(c *Config) error {
+		c.Runtime.QuotaWindowHours = 500
+		return nil
+	}); err != nil {
+		t.Fatalf("seed out-of-range window: %v", err)
+	}
+	if got := store.RuntimeQuotaWindowHours(); got != 168 {
+		t.Fatalf("expected out-of-range quota window clamped to 168, got %d", got)
+	}
+}
+
+func TestLoadStoreWithErrorRejectsInvalidQuotaWindow(t *testing.T) {
+	t.Setenv("DS2API_CONFIG_JSON", `{
+		"keys":["k1"],
+		"accounts":[{"email":"u@example.com","password":"p"}],
+		"runtime":{"quota_window_hours":200}
+	}`)
+	t.Setenv("DS2API_ENV_WRITEBACK", "0")
+
+	if _, err := LoadStoreWithError(); err == nil {
+		t.Fatal("expected LoadStoreWithError to reject out-of-range quota window")
+	} else if !strings.Contains(err.Error(), "runtime.quota_window_hours") {
+		t.Fatalf("expected quota window validation error, got %v", err)
+	}
+}
+
 func TestStoreUpdateAccountTokenKeepsIdentifierResolvable(t *testing.T) {
 	t.Setenv("DS2API_CONFIG_JSON", `{
 		"accounts":[{"email":"user@example.com","password":"p"}]

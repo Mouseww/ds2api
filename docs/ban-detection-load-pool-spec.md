@@ -1,4 +1,4 @@
-﻿# DS2API 账号封禁检测与负载池 — 需求规格
+# DS2API 账号封禁检测与负载池 — 需求规格
 
 > 状态：需求规格（requirements）
 > 范围：账号封禁检测、自动禁用、负载池目标并发账号数（`active_pool_size`）与备用账号补足、Admin API 与 WebUI 暴露面。
@@ -272,12 +272,13 @@ type RuntimeConfig struct {
 5. **并发安全**：`rebalance`、`RemoveAccount`、`Acquire*` 共享同一把池锁；`lastBanRecheckAt` 由 `Resolver.mu` 保护。
 6. **测试**：为 `extractBanFields`（已有）、封禁→禁用、rebalance 补足、`active_pool_size` 校验、Admin API 新增字段、Settings 读写新增字段各补单元/HTTP 测试，纳入仓库 `./tests/scripts/run-unit-all.sh` 与 `./scripts/lint.sh` 门槛。
 
-## 全局单账号每日限额（Daily Quota）
+## 全局单账号限额（Quota）
 
 - 设置项：`runtime.daily_token_limit_m`（单位百万，`m`，0 = 不限制）与 `runtime.daily_request_limit`（次，0 = 不限制）。
-- 两个指标是**独立或**关系：任一达到上限，该账号当日即退出轮换池。
+- 统计窗口：`runtime.quota_window_hours`（小时，0 = 默认 24，范围 1–168）。两个限额都按**过去 N 小时的滚动用量**统计，窗口外的旧用量不再计入，账号会自动恢复轮换资格。
+- 两个指标是**独立或**关系：任一达到上限，该账号即退出轮换池。
 - 触发后由备用池中未达上限的账号补位；主动池与备用池均按同一规则过滤。
-- 统计口径为账号**本地日历日**（与仪表盘 UTC 桶不同），跨天后自动清零。
-- 账号列表返回 `usage_today_requests`、`usage_today_tokens`、`daily_token_limit`、`daily_request_limit`、`daily_limited` 供界面展示。
+- 数据源：usage-stats 的按账号分钟桶（窗口 ≤ 30 小时时精确到分钟）；更宽的窗口回退到小时桶，边界最多多计一个小时（对限额而言是保守方向）。
+- 账号列表返回 `usage_today_requests`、`usage_today_tokens`（字段名保留兼容，语义为窗口内用量）、`daily_token_limit`、`daily_request_limit`、`daily_limited` 与顶层 `quota_window_hours` 供界面展示。
 - 用量结果在账号获取热路径上缓存 5 秒，因此超限判定最多滞后约 5 秒生效。
-- 界面：达到限额的账号显示黄色「已达今日限额」徽标；今日用量以 `今日 X · Y 次` 展示，悬停可见上限。
+- 界面：达到限额的账号显示黄色「已达限额」徽标；窗口用量以 `近 N 小时 X · Y 次` 展示，悬停可见上限。

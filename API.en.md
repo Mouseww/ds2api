@@ -147,11 +147,14 @@ Gemini-compatible clients can also send `x-goog-api-key`, `?key=`, or `?api_key=
 | PUT | `/admin/proxies/{proxyID}` | Admin | Update proxy (empty password keeps old secret) |
 | DELETE | `/admin/proxies/{proxyID}` | Admin | Delete proxy (auto-unbind referenced accounts) |
 | POST | `/admin/proxies/test` | Admin | Test proxy connectivity |
-| GET | `/admin/accounts` | Admin | Paginated account list |
+| GET | `/admin/accounts` | Admin | Paginated account list (filterable/sortable) |
 | POST | `/admin/accounts` | Admin | Add account |
 | PUT | `/admin/accounts/{identifier}` | Admin | Update account name/remark |
 | DELETE | `/admin/accounts/{identifier}` | Admin | Delete account |
 | PUT | `/admin/accounts/{identifier}/proxy` | Admin | Bind/unbind proxy for an account |
+| POST | `/admin/accounts/batch-delete` | Admin | Batch delete accounts |
+| POST | `/admin/accounts/batch-status` | Admin | Batch enable/disable accounts |
+| POST | `/admin/accounts/batch-proxy` | Admin | Batch bind/unbind proxies |
 | GET | `/admin/queue/status` | Admin | Account queue status |
 | POST | `/admin/accounts/test` | Admin | Test one account |
 | POST | `/admin/accounts/test-all` | Admin | Test all accounts |
@@ -769,7 +772,7 @@ Reads runtime settings and status, including:
 
 - `success`
 - `admin` (`has_password_hash`, `jwt_expire_hours`, `jwt_valid_after_unix`, `default_password_warning`)
-- `runtime` (`account_max_inflight`, `account_max_queue`, `global_max_inflight`, `token_refresh_interval_hours`)
+- `runtime` (`account_max_inflight`, `account_max_queue`, `global_max_inflight`, `token_refresh_interval_hours`, `active_pool_size`, `daily_token_limit_m`, `daily_request_limit`, `quota_window_hours`)
 - `responses` / `embeddings`
 - `auto_delete` (`mode`: `none` / `single` / `all`; legacy `sessions=true` is still treated as `all`)
 - `current_input_file` (`enabled` defaults to `false`, plus `min_chars`)
@@ -784,6 +787,7 @@ Hot-updates runtime settings. Supported fields:
 
 - `admin.jwt_expire_hours`
 - `runtime.account_max_inflight` / `runtime.account_max_queue` / `runtime.global_max_inflight` / `runtime.token_refresh_interval_hours`
+- `runtime.daily_token_limit_m` / `runtime.daily_request_limit` / `runtime.quota_window_hours` (limits are counted over the last N hours of rolling usage; 0 = default 24, range 1–168)
 - `responses.store_ttl_seconds`
 - `embeddings.provider`
 - `auto_delete.mode`
@@ -871,7 +875,20 @@ Tests proxy connectivity: provide `proxy_id` to test a saved proxy; omit it to r
 | --- | --- | --- |
 | `page` | `1` | ≥ 1 |
 | `page_size` | `10` | 1–5000 |
-| `q` | empty | Filter by identifier / email / mobile |
+| `q` | empty | Filter by identifier / email / mobile / name / remark |
+| `enabled` | `all` | `all` / `true` / `false`, filter by disabled state |
+| `test_status` | `all` | `all` / `ok` / `failed` / `unknown`, filter by test status |
+| `banned` | `all` | `all` / `true` / `false`, filter by ban state |
+| `daily_limited` | `all` | `all` / `true` / `false`, filter by quota exhaustion inside the window |
+| `has_proxy` | `all` | `all` / `true` / `false`, filter by proxy binding |
+| `in_pool` | `all` | `all` / `true` / `false`, filter by active-pool membership |
+| `sort` | `default` | `default` / `usage_tokens` / `usage_requests` / `usage_today_tokens` / `usage_today_requests` / `test_status` / `enabled` / `name` / `identifier` |
+| `order` | per key | `asc` / `desc`; ignored when `sort=default` |
+
+Sorting notes:
+
+- `default` (the default): accounts that are enabled and in the active pool come first, keeping the existing newest-first order inside each group;
+- other keys sort by the requested field; when `order` is omitted, numeric/status keys default to descending and `name` / `identifier` default to ascending.
 
 **Response**:
 
@@ -885,17 +902,22 @@ Tests proxy connectivity: provide `proxy_id` to test a saved proxy; omit it to r
       "has_password": true,
       "has_token": true,
       "token_preview": "abc...",
-      "test_status": "ok"
+      "test_status": "ok",
+      "in_pool": true,
+      "usage_today_tokens": 1200000,
+      "usage_today_requests": 34,
+      "daily_limited": false
     }
   ],
   "total": 25,
   "page": 1,
   "page_size": 10,
-  "total_pages": 3
+  "total_pages": 3,
+  "quota_window_hours": 24
 }
 ```
 
-Returned items also include `test_status`, usually `ok` or `failed`.
+The `usage_today_tokens` / `usage_today_requests` names are kept for compatibility; since the quota window became configurable they carry the rolling-window usage (default 24 hours, see `runtime.quota_window_hours`). `daily_limited` reports whether the window usage reached either configured limit.
 
 ### `POST /admin/accounts`
 
@@ -929,6 +951,50 @@ Updates proxy binding for a specific account.
 - Use empty `proxy_id` to unbind proxy.
 - `identifier` supports email / mobile / token-only synthetic id.
 
+### `POST /admin/accounts/batch-delete`
+
+Batch-deletes accounts. Request body:
+
+```json
+{"identifiers": ["a@example.com", "13800138000"]}
+```
+
+`identifiers` supports email / mobile / token-only synthetic ids, up to 5000 entries. Response:
+
+```json
+{"success": true, "deleted": 2, "missing": ["ghost@example.com"], "total_accounts": 3}
+```
+
+`missing` lists the identifiers that matched no account.
+
+### `POST /admin/accounts/batch-status`
+
+Batch enables or disables accounts. Request body:
+
+```json
+{"identifiers": ["a@example.com"], "enabled": false}
+```
+
+Semantics match the `enabled` field of the single-account `PUT /admin/accounts/{identifier}` (disable reason is recorded as `manual`). Response:
+
+```json
+{"success": true, "updated": 1, "missing": [], "total_accounts": 3}
+```
+
+### `POST /admin/accounts/batch-proxy`
+
+Batch binds/unbinds a proxy for accounts. Request body:
+
+```json
+{"identifiers": ["a@example.com", "b@example.com"], "proxy_id": "proxy_xxx"}
+```
+
+An empty `proxy_id` unbinds; an unknown proxy returns 400 without applying any change. Response:
+
+```json
+{"success": true, "updated": 2, "missing": [], "proxy_id": "proxy_xxx", "total_accounts": 3}
+```
+
 ### `GET /admin/queue/status`
 
 ```json
@@ -938,6 +1004,7 @@ Updates proxy binding for a specific account.
   "total": 4,
   "available_accounts": ["a@example.com"],
   "in_use_accounts": ["b@example.com"],
+  "active_pool_accounts": ["a@example.com", "b@example.com"],
   "max_inflight_per_account": 2,
   "global_max_inflight": 8,
   "recommended_concurrency": 8,
@@ -953,6 +1020,7 @@ Updates proxy binding for a specific account.
 | `total` | Total accounts |
 | `available_accounts` | List of account IDs with remaining inflight capacity |
 | `in_use_accounts` | List of account IDs currently in use |
+| `active_pool_accounts` | List of account IDs currently in the active pool (enabled and allocated traffic) |
 | `max_inflight_per_account` | Per-account inflight limit |
 | `global_max_inflight` | Global inflight limit |
 | `recommended_concurrency` | Suggested concurrency (`total × max_inflight_per_account`) |
