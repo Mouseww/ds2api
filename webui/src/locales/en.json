@@ -337,7 +337,13 @@
         "batchProxySuccess": "Updated proxy for {count} accounts",
         "batchPartialWarning": "Applied to {count} accounts; not found: {missing}",
         "inPoolBadge": "In pool",
-        "inPoolBadgeTitle": "This account is currently in the active load pool and receives requests first"
+        "inPoolBadgeTitle": "This account is currently in the active load pool and receives requests first",
+        "quotaWindowLabel": "Quota window",
+        "quotaWindowUnit": "h",
+        "quotaWindowApply": "Apply",
+        "quotaWindowHelp": "Token and request limits are counted over the last N hours of rolling usage (0 = default 24, range 1–168). Changes take effect immediately.",
+        "quotaWindowUpdated": "Quota window updated.",
+        "quotaWindowInvalid": "Window hours must be between 0 and 168 (0 = default 24 hours)"
     },
     "proxyManager": {
         "title": "Proxy IPs",

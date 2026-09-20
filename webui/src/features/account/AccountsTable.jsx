@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { ChevronLeft, ChevronRight, Check, Copy, Pencil, Play, Plus, Trash2, FolderX, ToggleLeft, ToggleRight, AlertTriangle, X, ListFilter } from 'lucide-react'
 import clsx from 'clsx'
 
@@ -56,6 +56,8 @@ export default function AccountsTable({
     onBatchDisable,
     onBatchProxy,
     batchOperating = false,
+    onUpdateQuotaWindow,
+    quotaWindowSaving = false,
     envBacked = false,
     onToggleEnabled,
     togglingEnabled = {},
@@ -63,6 +65,22 @@ export default function AccountsTable({
     const [copiedId, setCopiedId] = useState(null)
     const [selected, setSelected] = useState(() => new Set())
     const [batchProxyId, setBatchProxyId] = useState('')
+    const [windowInput, setWindowInput] = useState(quotaWindowHours)
+
+    // Keep the inline window editor in sync when the effective window changes
+    // after a save or a fresh list fetch.
+    useEffect(() => {
+        setWindowInput(quotaWindowHours)
+    }, [quotaWindowHours])
+
+    const windowValue = Number(windowInput)
+    const windowDirty = Number.isFinite(windowValue) && windowValue !== Number(quotaWindowHours)
+    const windowValid = Number.isFinite(windowValue) && windowValue >= 0 && windowValue <= 168
+
+    const applyQuotaWindow = () => {
+        if (!windowValid || !onUpdateQuotaWindow) return
+        onUpdateQuotaWindow(windowValue)
+    }
 
     const copyId = (id) => {
         navigator.clipboard.writeText(id).then(() => {
@@ -235,6 +253,34 @@ export default function AccountsTable({
                         <option value="asc">{t('accountManager.orderAsc')}</option>
                     </select>
                 </label>
+                <span className="flex items-center gap-1.5 text-xs text-muted-foreground ml-auto">
+                    <span className="whitespace-nowrap font-medium" title={t('accountManager.quotaWindowHelp')}>
+                        {t('accountManager.quotaWindowLabel')}
+                    </span>
+                    <input
+                        type="number"
+                        min={0}
+                        max={168}
+                        step={1}
+                        value={windowInput}
+                        onChange={e => setWindowInput(e.target.value)}
+                        onKeyDown={e => {
+                            if (e.key === 'Enter') applyQuotaWindow()
+                        }}
+                        disabled={quotaWindowSaving}
+                        className="w-16 px-2 py-1 text-xs bg-muted border border-border rounded-md focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
+                    />
+                    <span className="whitespace-nowrap">{t('accountManager.quotaWindowUnit')}</span>
+                    <button
+                        onClick={applyQuotaWindow}
+                        disabled={!windowDirty || !windowValid || quotaWindowSaving}
+                        title={t('accountManager.quotaWindowHelp')}
+                        className="flex items-center gap-1 px-2 py-1 text-xs font-medium bg-secondary text-secondary-foreground border border-border rounded-md hover:bg-secondary/80 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                        {quotaWindowSaving ? <span className="animate-spin">⟳</span> : <Check className="w-3 h-3" />}
+                        {t('accountManager.quotaWindowApply')}
+                    </button>
+                </span>
                 {hasActiveFilter && (
                     <button
                         onClick={onResetFilters}

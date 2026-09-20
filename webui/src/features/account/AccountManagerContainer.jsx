@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { useI18n } from '../../i18n'
 import { useAccountsData } from './useAccountsData'
 import { useAccountActions } from './useAccountActions'
@@ -89,6 +90,39 @@ export default function AccountManagerContainer({ config, onRefresh, onMessage, 
         resolveAccountIdentifier,
     })
 
+    const [quotaWindowSaving, setQuotaWindowSaving] = useState(false)
+
+    // Adjusts the risk-control quota window straight from the account list, so
+    // operators can tune it while looking at the per-account window usage. It
+    // reuses the settings endpoint, which accepts partial runtime updates.
+    const updateQuotaWindow = async (hours) => {
+        const value = Number(hours)
+        if (!Number.isFinite(value) || value < 0 || value > 168) {
+            onMessage('error', t('accountManager.quotaWindowInvalid'))
+            return
+        }
+        setQuotaWindowSaving(true)
+        try {
+            const res = await apiFetch('/admin/settings', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ runtime: { quota_window_hours: value } }),
+            })
+            const data = await res.json().catch(() => ({}))
+            if (!res.ok) {
+                onMessage('error', data.detail || t('messages.requestFailed'))
+                return
+            }
+            onMessage('success', t('accountManager.quotaWindowUpdated'))
+            fetchAccounts()
+            onRefresh()
+        } catch (_e) {
+            onMessage('error', t('messages.networkError'))
+        } finally {
+            setQuotaWindowSaving(false)
+        }
+    }
+
     return (
         <div className="space-y-6">
             {Boolean(config?.env_source_present) && (
@@ -168,6 +202,8 @@ export default function AccountManagerContainer({ config, onRefresh, onMessage, 
                 onBatchDisable={ids => batchUpdateStatus(ids, false)}
                 onBatchProxy={batchUpdateProxy}
                 batchOperating={batchOperating}
+                onUpdateQuotaWindow={updateQuotaWindow}
+                quotaWindowSaving={quotaWindowSaving}
                 envBacked={Boolean(config?.env_backed)}
             />
 

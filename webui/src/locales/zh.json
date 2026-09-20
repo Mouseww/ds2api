@@ -335,7 +335,13 @@
         "batchProxySuccess": "已更新 {count} 个账号的代理",
         "batchPartialWarning": "已处理 {count} 个账号，未找到：{missing}",
         "inPoolBadge": "在池",
-        "inPoolBadgeTitle": "该账号当前位于负载活跃池中，会优先分配请求"
+        "inPoolBadgeTitle": "该账号当前位于负载活跃池中，会优先分配请求",
+        "quotaWindowLabel": "限额窗口",
+        "quotaWindowUnit": "小时",
+        "quotaWindowApply": "应用",
+        "quotaWindowHelp": "Token 与请求次数限额按过去 N 小时的滚动用量统计（0 = 默认 24，范围 1–168）。修改后立即生效。",
+        "quotaWindowUpdated": "限额统计窗口已更新",
+        "quotaWindowInvalid": "窗口小时数需在 0–168 之间（0 = 默认 24 小时）"
     },
     "proxyManager": {
         "title": "代理 IP",
