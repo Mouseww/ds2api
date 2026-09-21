@@ -311,3 +311,98 @@ func TestPoolAcquireWaitQueueLimitReturnsFalse(t *testing.T) {
 		t.Fatal("timed out waiting for first queued acquire")
 	}
 }
+
+// TestPoolReleaseFreesGlobalInflight guards the totalInUse accounting: Release
+// must give the global in-flight slot back, not just the per-account one. With
+// the old Release that mutated p.inUse directly, totalInUse only ever grew and
+// a global cap stayed exhausted forever after its first fill.
+func TestPoolReleaseFreesGlobalInflight(t *testing.T) {
+	t.Setenv("DS2API_ACCOUNT_MAX_INFLIGHT", "1")
+	t.Setenv("DS2API_ACCOUNT_MAX_QUEUE", "")
+	t.Setenv("DS2API_GLOBAL_MAX_INFLIGHT", "1")
+	t.Setenv("DS2API_CONFIG_JSON", `{
+		"keys":["k1"],
+		"accounts":[
+			{"email":"acc1@example.com","token":"token1"},
+			{"email":"acc2@example.com","token":"token2"}
+		]
+	}`)
+	pool := NewPool(config.LoadStore())
+
+	first, ok := pool.Acquire("", nil)
+	if !ok {
+		t.Fatal("expected first acquire to succeed")
+	}
+	if _, ok := pool.Acquire("", nil); ok {
+		t.Fatal("expected second acquire to fail while global inflight cap is reached")
+	}
+
+	pool.Release(first.Identifier())
+
+	second, ok := pool.Acquire("", nil)
+	if !ok {
+		t.Fatal("expected acquire to succeed again after Release returned the global slot")
+	}
+	pool.Release(second.Identifier())
+}
+
+// TestPoolAcquireWaitTargetWakesOnOtherAccountRelease guards the broadcast
+// wakeup: a waiter parked on a full target account must not lose its wakeup
+// when a different account is released. It wakes, re-checks under p.mu,
+// re-parks, and still succeeds when its target finally frees a slot. The old
+// per-waiter FIFO handoff could drop exactly this wakeup.
+func TestPoolAcquireWaitTargetWakesOnOtherAccountRelease(t *testing.T) {
+	t.Setenv("DS2API_ACCOUNT_MAX_INFLIGHT", "1")
+	t.Setenv("DS2API_ACCOUNT_MAX_QUEUE", "")
+	t.Setenv("DS2API_CONFIG_JSON", `{
+		"keys":["k1"],
+		"accounts":[
+			{"email":"acc1@example.com","token":"token1"},
+			{"email":"acc2@example.com","token":"token2"}
+		]
+	}`)
+	pool := NewPool(config.LoadStore())
+
+	acc1, ok := pool.Acquire("acc1@example.com", nil)
+	if !ok {
+		t.Fatal("expected acquire acc1 to succeed")
+	}
+	acc2, ok := pool.Acquire("acc2@example.com", nil)
+	if !ok {
+		t.Fatal("expected acquire acc2 to succeed")
+	}
+
+	type result struct {
+		id string
+		ok bool
+	}
+	resCh := make(chan result, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	go func() {
+		acc, ok := pool.AcquireWait(ctx, "acc2@example.com", nil)
+		resCh <- result{id: acc.Identifier(), ok: ok}
+	}()
+
+	waitForWaitingCount(t, pool, 1)
+
+	// Release the account the waiter is NOT waiting on. The broadcast must
+	// wake the waiter, which re-checks, finds acc2 still full, and re-parks.
+	pool.Release(acc1.Identifier())
+	time.Sleep(50 * time.Millisecond)
+
+	// Now free the target: the re-parked waiter must still get its wakeup.
+	pool.Release(acc2.Identifier())
+
+	select {
+	case res := <-resCh:
+		if !res.ok {
+			t.Fatal("expected targeted waiter to succeed after its target account freed a slot")
+		}
+		if res.id != "acc2@example.com" {
+			t.Fatalf("expected acc2 from targeted waiter, got %q", res.id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for targeted waiter; wakeup was lost")
+	}
+}

@@ -60,7 +60,11 @@ func (h *Handler) Responses(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, status, detail)
 		return
 	}
-	defer h.Auth.Release(a)
+	var sessionID string
+	defer func() {
+		completionruntime.AutoDeleteRemoteSession(r.Context(), h.DS, h.Store, a, sessionID)
+		h.Auth.Release(a)
+	}()
 	r = r.WithContext(auth.WithAuth(r.Context(), a))
 	owner := responseStoreOwner(a)
 	if owner == "" {
@@ -108,6 +112,7 @@ func (h *Handler) Responses(w http.ResponseWriter, r *http.Request) {
 			RetryEnabled:     true,
 			CurrentInputFile: h.Store,
 		})
+		sessionID = result.SessionID
 		if outErr != nil {
 			if historySession != nil {
 				historySession.ErrorTurn(outErr.Status, outErr.Message, outErr.Code, result.Turn)
@@ -129,6 +134,7 @@ func (h *Handler) Responses(w http.ResponseWriter, r *http.Request) {
 		RetryEnabled:     true,
 		CurrentInputFile: h.Store,
 	})
+	sessionID = start.SessionID
 	if outErr != nil {
 		if historySession != nil {
 			historySession.Error(outErr.Status, outErr.Message, outErr.Code, "", "")

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"ds2api/internal/auth"
+	"ds2api/internal/completionruntime"
 	"ds2api/internal/config"
 	"ds2api/internal/httpapi/openai/history"
 	"ds2api/internal/promptcompat"
@@ -150,7 +151,7 @@ func (h *Handler) handleVercelStreamRelease(w http.ResponseWriter, r *http.Reque
 		defer h.Auth.Release(lease.Auth)
 	}
 	if lease.Auth != nil {
-		h.autoDeleteRemoteSession(r.Context(), lease.Auth, lease.SessionID)
+		completionruntime.AutoDeleteRemoteSession(r.Context(), h.DS, h.Store, lease.Auth, lease.SessionID)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }

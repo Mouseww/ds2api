@@ -395,3 +395,113 @@ func TestDetermineManagedAccountReturnsLastEnsureErrorWhenAllFail(t *testing.T) 
 		t.Fatalf("expected auth-style ensure error, got ErrNoAccount")
 	}
 }
+
+// TestLoginSingleFlightDedupesConcurrentLogins guards the login singleflight:
+// when several concurrent requests on the same tokenless account all need a
+// login, exactly one Login call may hit DeepSeek and every caller must
+// receive the resulting token. Without the flight, concurrent 401s, ban
+// re-checks, and the unban monitor stampede the login endpoint.
+func TestLoginSingleFlightDedupesConcurrentLogins(t *testing.T) {
+	t.Setenv("DS2API_CONFIG_JSON", `{
+		"keys":["managed-key"],
+		"accounts":[{"email":"acc@example.com","password":"pwd","token":""}]
+	}`)
+	store := config.LoadStore()
+	pool := account.NewPool(store)
+
+	var loginCalls int32
+	release := make(chan struct{})
+	resolver := NewResolver(store, pool, func(_ context.Context, _ config.Account) (string, error) {
+		atomic.AddInt32(&loginCalls, 1)
+		<-release
+		return "fresh-token", nil
+	})
+
+	determine := func() *RequestAuth {
+		req, _ := http.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		req.Header.Set("x-api-key", "managed-key")
+		a, err := resolver.Determine(req)
+		if err != nil {
+			t.Errorf("determine failed: %v", err)
+			return nil
+		}
+		return a
+	}
+
+	type result struct {
+		a *RequestAuth
+	}
+	resCh := make(chan result, 2)
+	go func() { resCh <- result{a: determine()} }()
+	go func() { resCh <- result{a: determine()} }()
+
+	// Let both callers reach the login path: one leads the flight (blocked
+	// in Login), the other parks on the shared result.
+	time.Sleep(150 * time.Millisecond)
+	close(release)
+
+	for i := 0; i < 2; i++ {
+		select {
+		case res := <-resCh:
+			if res.a == nil {
+				t.Fatal("determine failed on a concurrent caller")
+			}
+			defer resolver.Release(res.a)
+			if res.a.DeepSeekToken != "fresh-token" {
+				t.Fatalf("expected concurrent caller to receive the flight token, got %q", res.a.DeepSeekToken)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for concurrent determine")
+		}
+	}
+	if got := atomic.LoadInt32(&loginCalls); got != 1 {
+		t.Fatalf("expected exactly 1 login call, got %d", got)
+	}
+}
+
+// TestRefreshTokenFailureKeepsStoredToken guards the refresh order: a failed
+// re-login must not leave the account tokenless in the store. The old
+// RefreshToken blanked the persisted token before logging in, so any login
+// failure removed the credential and forced every later request into its own
+// login attempt.
+func TestRefreshTokenFailureKeepsStoredToken(t *testing.T) {
+	t.Setenv("DS2API_CONFIG_JSON", `{
+		"keys":["managed-key"],
+		"accounts":[{"email":"acc@example.com","password":"pwd"}]
+	}`)
+	store := config.LoadStore()
+	// Env-sourced configs have account tokens cleared on load; put one back
+	// so Determine can lease the account without logging in.
+	if err := store.Update(func(c *config.Config) error {
+		c.Accounts[0].Token = "account-token"
+		return nil
+	}); err != nil {
+		t.Fatalf("seeding stored token failed: %v", err)
+	}
+	pool := account.NewPool(store)
+	resolver := NewResolver(store, pool, func(_ context.Context, _ config.Account) (string, error) {
+		return "", errors.New("login upstream unavailable")
+	})
+
+	req, _ := http.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("x-api-key", "managed-key")
+	a, err := resolver.Determine(req)
+	if err != nil {
+		t.Fatalf("determine failed: %v", err)
+	}
+	defer resolver.Release(a)
+	if a.DeepSeekToken != "account-token" {
+		t.Fatalf("expected determine to use the stored token, got %q", a.DeepSeekToken)
+	}
+
+	if resolver.RefreshToken(context.Background(), a) {
+		t.Fatal("expected refresh to fail when login fails")
+	}
+	acc, ok := store.FindAccount("acc@example.com")
+	if !ok {
+		t.Fatal("expected account to exist")
+	}
+	if acc.Token != "account-token" {
+		t.Fatalf("expected stored token to survive a failed refresh, got %q", acc.Token)
+	}
+}

@@ -25,7 +25,7 @@ func (p *Pool) ApplyRuntimeLimits(maxInflightPerAccount, maxQueueSize, globalMax
 	p.maxQueueSize = maxQueueSize
 	p.globalMaxInflight = globalMaxInflight
 	p.recommendedConcurrency = defaultRecommendedConcurrency(len(p.queue), p.maxInflightPerAccount)
-	p.notifyWaiterLocked()
+	p.notifyWaitersLocked()
 }
 
 func maxInflightFromEnv() int {
@@ -59,6 +59,11 @@ func maxQueueFromEnv(defaultSize int) int {
 	return defaultSize
 }
 
+// canAcquireIDLocked reports whether accountID has a free per-account slot and
+// the pool still has global capacity. Both checks are O(1): the global total is
+// maintained incrementally in p.totalInUse instead of being summed from p.inUse
+// for every candidate account, which made the acquire path O(n²) in the number
+// of accounts. Callers must hold p.mu.
 func (p *Pool) canAcquireIDLocked(accountID string) bool {
 	if accountID == "" {
 		return false
@@ -66,16 +71,32 @@ func (p *Pool) canAcquireIDLocked(accountID string) bool {
 	if p.inUse[accountID] >= p.maxInflightPerAccount {
 		return false
 	}
-	if p.globalMaxInflight > 0 && p.currentInUseLocked() >= p.globalMaxInflight {
+	if p.globalMaxInflight > 0 && p.totalInUse >= p.globalMaxInflight {
 		return false
 	}
 	return true
 }
 
-func (p *Pool) currentInUseLocked() int {
-	total := 0
-	for _, n := range p.inUse {
-		total += n
+// takeSlotLocked records one in-flight request for accountID and keeps the O(1)
+// global total in sync with p.inUse. Callers must hold p.mu.
+func (p *Pool) takeSlotLocked(accountID string) {
+	p.inUse[accountID]++
+	p.totalInUse++
+}
+
+// releaseSlotLocked gives one in-flight slot back, reporting whether accountID
+// had a slot to release. The global total is decremented next to the
+// per-account counter so the two can never drift apart. Callers must hold p.mu.
+func (p *Pool) releaseSlotLocked(accountID string) bool {
+	count := p.inUse[accountID]
+	if count <= 0 {
+		return false
 	}
-	return total
+	if count == 1 {
+		delete(p.inUse, accountID)
+	} else {
+		p.inUse[accountID] = count - 1
+	}
+	p.totalInUse--
+	return true
 }

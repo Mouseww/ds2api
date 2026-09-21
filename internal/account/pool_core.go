@@ -12,9 +12,13 @@ type Pool struct {
 	store                  *config.Store
 	mu                     sync.Mutex
 	queue                  []string
+	queuePos               map[string]int
+	queueCursor            int
 	standby                []string
 	inUse                  map[string]int
-	waiters                []chan struct{}
+	totalInUse             int
+	waiters                int
+	wakeCh                 chan struct{}
 	maxInflightPerAccount  int
 	recommendedConcurrency int
 	maxQueueSize           int
@@ -23,8 +27,10 @@ type Pool struct {
 
 	// Quota enforcement: the provider reports per-account usage for the
 	// configured rolling window, cached briefly so the acquire path stays
-	// cheap.
+	// cheap. The provider is always invoked without p.mu held; dailyUsageMu
+	// serializes refreshes so an expired cache triggers a single read.
 	dailyUsageProvider DailyUsageProvider
+	dailyUsageMu       sync.Mutex
 	dailyUsageCache    map[string]DailyUsage
 	dailyUsageCachedAt time.Time
 }
@@ -51,11 +57,13 @@ func (p *Pool) Reset() {
 	} else {
 		p.maxInflightPerAccount = maxInflightFromEnv()
 	}
+	usage := p.usageSnapshot()
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.rebuildLocked()
-	p.drainWaitersLocked()
+	p.rebuildLocked(usage)
 	p.inUse = map[string]int{}
+	p.totalInUse = 0
+	p.notifyWaitersLocked()
 	config.Logger.Info(
 		"[init_account_queue] initialized",
 		"total", len(p.queue),
@@ -72,10 +80,11 @@ func (p *Pool) Reset() {
 // (enable/disable toggle, ban eviction, active_pool_size change) without
 // dropping in-flight accounting. Waiting acquirers are re-notified.
 func (p *Pool) Rebalance() {
+	usage := p.usageSnapshot()
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.rebuildLocked()
-	p.drainWaitersLocked()
+	p.rebuildLocked(usage)
+	p.notifyWaitersLocked()
 }
 
 // RemoveAccount evicts a single account from the active set immediately. It is
@@ -85,6 +94,7 @@ func (p *Pool) RemoveAccount(accountID string) {
 	if accountID == "" {
 		return
 	}
+	usage := p.usageSnapshot()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	// Sanity check: this is only meaningful once the store has already
@@ -99,53 +109,64 @@ func (p *Pool) RemoveAccount(accountID string) {
 			)
 		}
 	}
-	p.rebuildLocked()
-	p.drainWaitersLocked()
+	p.rebuildLocked(usage)
+	p.notifyWaitersLocked()
 }
 
 // rebuildLocked recomputes the active queue and derived concurrency limits.
-// It must be called with p.mu held.
-func (p *Pool) rebuildLocked() {
-	p.rebuildQueueLocked()
+// The usage snapshot must be taken before p.mu is acquired (usageSnapshot
+// briefly takes p.mu itself), which is why callers capture it first and pass
+// it in. It must be called with p.mu held.
+func (p *Pool) rebuildLocked(usage map[string]DailyUsage) {
+	p.rebuildQueueLocked(usage)
 	p.recomputeLimitsLocked()
 }
 
 // rebuildQueueLocked selects eligible accounts (enabled && not banned) in the
 // existing stable token-first order, keeps the first activePoolSize of them as
-// the active queue and tracks the rest as standby. Must be called with p.mu.
-func (p *Pool) rebuildQueueLocked() {
+// the active queue and tracks the rest as standby. It also rebuilds the
+// queuePos index that bumpQueue uses for its O(1) round-robin cursor move.
+// Must be called with p.mu.
+func (p *Pool) rebuildQueueLocked(usage map[string]DailyUsage) {
 	p.activePoolSize = 0
 	if p.store != nil {
 		p.activePoolSize = p.store.RuntimeActivePoolSize()
 	}
-	candidates := p.eligibleAccountsLocked()
+	candidates := p.eligibleAccountsLocked(usage)
 	n := len(candidates)
 	if p.activePoolSize > 0 && p.activePoolSize < n {
 		n = p.activePoolSize
 	}
 	queue := make([]string, 0, n)
 	standby := make([]string, 0, len(candidates)-n)
-	for i, acc := range candidates {
+	queuePos := make(map[string]int, n)
+	for _, acc := range candidates {
 		id := acc.Identifier()
 		if id == "" {
 			continue
 		}
-		if i < n {
+		if len(queue) < n {
+			queuePos[id] = len(queue)
 			queue = append(queue, id)
 		} else {
 			standby = append(standby, id)
 		}
 	}
 	p.queue = queue
+	p.queuePos = queuePos
 	p.standby = standby
+	if p.queueCursor < 0 || p.queueCursor >= len(queue) {
+		p.queueCursor = 0
+	}
 }
 
 // eligibleAccountsLocked returns enabled, non-banned accounts that have not
 // exhausted their quota inside the configured window, in the existing stable
 // token-first ordering. Excluding over-quota accounts here is what makes a
 // standby account take the place of an active one that reached its limit.
-// Must be called with p.mu held.
-func (p *Pool) eligibleAccountsLocked() []config.Account {
+// The usage snapshot is supplied by the caller so the provider is never read
+// under p.mu. Must be called with p.mu held.
+func (p *Pool) eligibleAccountsLocked(usage map[string]DailyUsage) []config.Account {
 	var accounts []config.Account
 	if p.store != nil {
 		accounts = p.store.Accounts()
@@ -158,7 +179,6 @@ func (p *Pool) eligibleAccountsLocked() []config.Account {
 		}
 		return iHas
 	})
-	usage := p.dailyUsageLocked()
 	out := make([]config.Account, 0, len(accounts))
 	for _, acc := range accounts {
 		if acc.Identifier() == "" || !acc.IsEnabled() || acc.IsBanned() {
@@ -187,26 +207,25 @@ func (p *Pool) recomputeLimitsLocked() {
 	p.globalMaxInflight = globalLimit
 }
 
+// Release returns one in-flight slot for accountID. It goes through
+// releaseSlotLocked so the per-account counter and the O(1) global total
+// (totalInUse) can never drift apart, and broadcasts to parked acquirers so
+// any waiter that can now make progress wakes up.
 func (p *Pool) Release(accountID string) {
 	if accountID == "" {
 		return
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	count := p.inUse[accountID]
-	if count <= 0 {
-		return
+	if p.releaseSlotLocked(accountID) {
+		p.notifyWaitersLocked()
 	}
-	if count == 1 {
-		delete(p.inUse, accountID)
-		p.notifyWaiterLocked()
-		return
-	}
-	p.inUse[accountID] = count - 1
-	p.notifyWaiterLocked()
 }
 
 func (p *Pool) Status() map[string]any {
+	// The quota snapshot is read before p.mu: usageSnapshot takes p.mu
+	// internally, so reading it under Status' own lock would deadlock.
+	usage := p.quotaUsageSnapshot()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	available := make([]string, 0, len(p.queue))
@@ -251,13 +270,13 @@ func (p *Pool) Status() map[string]any {
 		"max_inflight_per_account": p.maxInflightPerAccount,
 		"global_max_inflight":      p.globalMaxInflight,
 		"recommended_concurrency":  p.recommendedConcurrency,
-		"waiting":                  len(p.waiters),
+		"waiting":                  p.waiters,
 		"max_queue_size":           p.maxQueueSize,
 		"active_pool_size":         p.activePoolSize,
 		"active_pool_count":        len(p.queue),
 		"standby_count":            len(p.standby),
 		"banned_count":             bannedCount,
 		"disabled_count":           disabledCount,
-		"daily_limited_count":      p.dailyLimitedCountLocked(),
+		"daily_limited_count":      p.dailyLimitedCountLocked(usage),
 	}
 }

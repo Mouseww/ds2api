@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"ds2api/internal/auth"
+	"ds2api/internal/completionruntime"
 	dsclient "ds2api/internal/deepseek/client"
 )
 
@@ -130,7 +131,7 @@ func TestAutoDeleteRemoteSessionIgnoresCanceledParentContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	h.autoDeleteRemoteSession(ctx, a, "session-id")
+	completionruntime.AutoDeleteRemoteSession(ctx, h.DS, h.Store, a, "session-id")
 
 	if ds.singleCalls != 1 {
 		t.Fatalf("single delete calls=%d want=1", ds.singleCalls)

@@ -316,7 +316,7 @@ VERCEL_TEAM_ID=team_xxxxxxxxxxxx   # 个人账号可留空
 
 部分运行时行为无法通过环境变量直接配置，需要在部署后通过 Admin API 设置，例如：
 
-- **自动删除会话模式** (`auto_delete.mode`)：支持 `none` / `single` / `all`，默认为 `none`。可通过 `PUT /admin/settings` 更新。
+- **自动删除会话模式** (`auto_delete.mode`)：支持 `none` / `single` / `all`，默认为 `none`。可通过 `PUT /admin/settings` 更新。该清理对所有协议入口（OpenAI Chat / Responses、Claude Messages、Gemini generateContent，含 Vercel 流式 release）统一生效。
 - **每账号并发上限** (`account_max_inflight`)：环境变量已支持，但也可通过 Admin API 热更新。
 - **全局并发上限** (`global_max_inflight`)：同上。
 

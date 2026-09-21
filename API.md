@@ -272,6 +272,7 @@ Content-Type: application/json
 | `messages` | array | ✅ | OpenAI 风格消息数组 |
 | `stream` | boolean | ❌ | 默认 `false` |
 | `tools` | array | ❌ | Function Calling 定义 |
+| `tool_choice` | string/object | ❌ | 支持 `auto` / `none` / `required` 与强制函数（`{"type":"function","function":{"name":"..."}}`），与 Responses 接口同一套解析；`required` / 强制函数违规时同样返回 `tool_choice_violation` |
 | `temperature` 等 | any | ❌ | 兼容透传字段（最终效果由上游决定） |
 
 #### 非流式响应

@@ -271,6 +271,7 @@ Content-Type: application/json
 | `messages` | array | ✅ | OpenAI-style messages |
 | `stream` | boolean | ❌ | Default `false` |
 | `tools` | array | ❌ | Function calling schema |
+| `tool_choice` | string/object | ❌ | `auto` / `none` / `required` and forced function (`{"type":"function","function":{"name":"..."}}`), parsed identically to the Responses API; violations return `tool_choice_violation` |
 | `temperature`, etc. | any | ❌ | Accepted but final behavior depends on upstream |
 
 #### Non-Stream Response

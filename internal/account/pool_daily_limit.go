@@ -33,26 +33,75 @@ func (p *Pool) SetDailyUsageProvider(provider DailyUsageProvider) {
 	p.dailyUsageCachedAt = time.Time{}
 }
 
-// dailyLimitsLocked reports the configured per-account budgets, in raw tokens
-// and requests. A zero budget disables that metric. Callers must hold p.mu.
-func (p *Pool) dailyLimitsLocked() (tokenLimit, requestLimit int64) {
+// dailyLimits reports the configured per-account budgets, in raw tokens and
+// requests. A zero budget disables that metric. It only reads the immutable
+// store handle and the store's own snapshot, so callers may invoke it with or
+// without p.mu held.
+func (p *Pool) dailyLimits() (tokenLimit, requestLimit int64) {
 	if p.store == nil {
 		return 0, 0
 	}
 	return p.store.RuntimeDailyTokenLimit(), int64(p.store.RuntimeDailyRequestLimit())
 }
 
-// dailyUsageLocked returns the cached per-account quota-window usage,
-// refreshing it once the cache expired. Callers must hold p.mu.
-func (p *Pool) dailyUsageLocked() map[string]DailyUsage {
-	if p.dailyUsageProvider == nil {
+// usageSnapshot returns the per-account quota-window usage, refreshing the
+// cached snapshot once it expired.
+//
+// The provider is deliberately never invoked while p.mu is held: it reads the
+// usage-stats store, which takes its own lock, so calling it under p.mu nested
+// the pool and store locks and let a slow provider stall every pool operation,
+// including Release. Refreshes are serialized by dailyUsageMu, which is only
+// ever taken without p.mu, so an expired cache triggers a single provider read
+// instead of one read per waiting acquirer.
+func (p *Pool) usageSnapshot() map[string]DailyUsage {
+	p.mu.Lock()
+	provider := p.dailyUsageProvider
+	cache := p.dailyUsageCache
+	cachedAt := p.dailyUsageCachedAt
+	p.mu.Unlock()
+
+	if provider == nil {
 		return nil
 	}
-	if p.dailyUsageCache == nil || time.Since(p.dailyUsageCachedAt) >= dailyUsageCacheTTL {
-		p.dailyUsageCache = p.dailyUsageProvider()
-		p.dailyUsageCachedAt = time.Now()
+	if cache != nil && time.Since(cachedAt) < dailyUsageCacheTTL {
+		return cache
 	}
-	return p.dailyUsageCache
+
+	p.dailyUsageMu.Lock()
+	defer p.dailyUsageMu.Unlock()
+
+	// Another goroutine may have refreshed the cache while we waited for the
+	// refresh lock, so re-check before reading the provider again.
+	p.mu.Lock()
+	provider = p.dailyUsageProvider
+	cache = p.dailyUsageCache
+	cachedAt = p.dailyUsageCachedAt
+	p.mu.Unlock()
+	if provider == nil {
+		return nil
+	}
+	if cache != nil && time.Since(cachedAt) < dailyUsageCacheTTL {
+		return cache
+	}
+
+	usage := provider()
+
+	p.mu.Lock()
+	p.dailyUsageCache = usage
+	p.dailyUsageCachedAt = time.Now()
+	p.mu.Unlock()
+	return usage
+}
+
+// quotaUsageSnapshot returns the usage snapshot only when per-account quota
+// budgets are configured, so a pool running with quotas disabled never touches
+// the usage-stats store just to render a status payload.
+func (p *Pool) quotaUsageSnapshot() map[string]DailyUsage {
+	tokenLimit, requestLimit := p.dailyLimits()
+	if tokenLimit <= 0 && requestLimit <= 0 {
+		return nil
+	}
+	return p.usageSnapshot()
 }
 
 // atDailyLimit reports whether usage has reached either configured budget.
@@ -72,7 +121,7 @@ func (p *Pool) accountDailyLimitedLocked(usage map[string]DailyUsage, accountID 
 	if accountID == "" {
 		return false
 	}
-	tokenLimit, requestLimit := p.dailyLimitsLocked()
+	tokenLimit, requestLimit := p.dailyLimits()
 	if tokenLimit <= 0 && requestLimit <= 0 {
 		return false
 	}
@@ -82,15 +131,15 @@ func (p *Pool) accountDailyLimitedLocked(usage map[string]DailyUsage, accountID 
 // promoteForDailyLimitsLocked rebuilds the active/standby split when a queued
 // account has exhausted its quota, so an account that has not reached its
 // limit takes its place. It reports whether a rebuild happened, which means
-// the caller's usage snapshot is still valid but p.queue changed. Callers must
-// hold p.mu.
+// p.queue changed; the caller's usage snapshot stays valid because the rebuild
+// is driven by that very snapshot. Callers must hold p.mu.
 func (p *Pool) promoteForDailyLimitsLocked(usage map[string]DailyUsage, tokenLimit, requestLimit int64) bool {
 	if tokenLimit <= 0 && requestLimit <= 0 {
 		return false
 	}
 	for _, id := range p.queue {
 		if atDailyLimit(usage[id], tokenLimit, requestLimit) {
-			p.rebuildQueueLocked()
+			p.rebuildQueueLocked(usage)
 			return true
 		}
 	}
@@ -98,17 +147,16 @@ func (p *Pool) promoteForDailyLimitsLocked(usage map[string]DailyUsage, tokenLim
 }
 
 // dailyLimitedCountLocked counts configured accounts that exhausted either
-// quota budget inside the current window, for the queue status payload.
-// Callers must hold p.mu.
-func (p *Pool) dailyLimitedCountLocked() int {
+// quota budget inside the supplied usage snapshot, for the queue status
+// payload. Callers must hold p.mu.
+func (p *Pool) dailyLimitedCountLocked(usage map[string]DailyUsage) int {
 	if p.store == nil {
 		return 0
 	}
-	tokenLimit, requestLimit := p.dailyLimitsLocked()
+	tokenLimit, requestLimit := p.dailyLimits()
 	if tokenLimit <= 0 && requestLimit <= 0 {
 		return 0
 	}
-	usage := p.dailyUsageLocked()
 	count := 0
 	for _, acc := range p.store.Accounts() {
 		id := acc.Identifier()

@@ -59,6 +59,7 @@ type Resolver struct {
 	mu               sync.Mutex
 	tokenRefreshedAt map[string]time.Time
 	banRecheckedAt   map[string]time.Time
+	loginFlights     map[string]*loginFlight
 }
 
 func NewResolver(store *config.Store, pool *account.Pool, login LoginFunc) *Resolver {
@@ -68,6 +69,7 @@ func NewResolver(store *config.Store, pool *account.Pool, login LoginFunc) *Reso
 		Login:            login,
 		tokenRefreshedAt: map[string]time.Time{},
 		banRecheckedAt:   map[string]time.Time{},
+		loginFlights:     map[string]*loginFlight{},
 	}
 }
 
@@ -166,31 +168,99 @@ func FromContext(ctx context.Context) (*RequestAuth, bool) {
 	return a, ok
 }
 
-func (r *Resolver) loginAndPersist(ctx context.Context, a *RequestAuth) error {
-	token, err := r.Login(ctx, a.Account)
-	if err != nil {
-		return err
+// loginFlight is one in-progress login for a single account. Concurrent
+// callers park on done and apply the shared result instead of each hitting the
+// DeepSeek login endpoint: concurrent 401 refreshes, ban re-checks, and the
+// unban monitor would otherwise stampede logins for the same account.
+type loginFlight struct {
+	done chan struct{}
+	res  loginFlightResult
+}
+
+type loginFlightResult struct {
+	token  string
+	banned bool
+	err    error
+}
+
+// performLogin runs one login for accountID, deduplicating concurrent
+// callers. The leader executes the login (and its persist / ban-reconcile /
+// post-login side effects) exactly once; everyone else waits for the same
+// result. A caller whose context is cancelled while waiting returns early
+// without applying the result.
+func (r *Resolver) performLogin(ctx context.Context, accountID string, acc config.Account) loginFlightResult {
+	if strings.TrimSpace(accountID) == "" {
+		// Degenerate caller: no account identity to dedupe on.
+		return r.executeLogin(ctx, accountID, acc)
 	}
-	r.markTokenRefreshedNow(a.AccountID)
+	r.mu.Lock()
+	if f, ok := r.loginFlights[accountID]; ok {
+		r.mu.Unlock()
+		select {
+		case <-f.done:
+			return f.res
+		case <-ctx.Done():
+			return loginFlightResult{err: ctx.Err()}
+		}
+	}
+	f := &loginFlight{done: make(chan struct{})}
+	r.loginFlights[accountID] = f
+	r.mu.Unlock()
+
+	f.res = r.executeLogin(ctx, accountID, acc)
+	close(f.done)
+
+	r.mu.Lock()
+	delete(r.loginFlights, accountID)
+	r.mu.Unlock()
+	return f.res
+}
+
+// executeLogin performs the actual login and its once-per-login side
+// effects: token persistence, ban reconciliation, and the PostLogin hook.
+func (r *Resolver) executeLogin(ctx context.Context, accountID string, acc config.Account) loginFlightResult {
+	token, err := r.Login(ctx, acc)
+	if err != nil {
+		return loginFlightResult{err: err}
+	}
+	r.markTokenRefreshedNow(accountID)
 	// The client persisted fresh ban fields during Login. Reconcile ban state:
 	// disable if newly banned, re-enable if ban has been lifted.
-	if acc, ok := r.Store.FindAccount(a.AccountID); ok {
-		if acc.IsBanned() {
-			a.Account.Token = ""
-			a.DeepSeekToken = ""
-			r.disableBannedAccount(a.AccountID, acc)
-			return errAccountBanned
+	if stored, ok := r.Store.FindAccount(accountID); ok {
+		if stored.IsBanned() {
+			r.disableBannedAccount(accountID, stored)
+			return loginFlightResult{banned: true, err: errAccountBanned}
 		}
-		r.reenableIfUnbanned(a.AccountID, acc)
+		r.reenableIfUnbanned(accountID, stored)
 	}
-	a.Account.Token = token
-	a.DeepSeekToken = token
-	if err := r.Store.UpdateAccountToken(a.AccountID, token); err != nil {
-		return err
+	if err := r.Store.UpdateAccountToken(accountID, token); err != nil {
+		return loginFlightResult{err: err}
 	}
 	if r.PostLogin != nil {
-		r.PostLogin(ctx, a)
+		r.PostLogin(ctx, &RequestAuth{
+			UseConfigToken: true,
+			AccountID:      accountID,
+			Account:        acc,
+			DeepSeekToken:  token,
+			TriedAccounts:  map[string]bool{},
+			resolver:       r,
+		})
 	}
+	return loginFlightResult{token: token}
+}
+
+func (r *Resolver) loginAndPersist(ctx context.Context, a *RequestAuth) error {
+	res := r.performLogin(ctx, a.AccountID, a.Account)
+	if res.banned {
+		a.Account.Token = ""
+		a.DeepSeekToken = ""
+		return res.err
+	}
+	if res.err != nil {
+		return res.err
+	}
+	a.Account.Token = res.token
+	a.DeepSeekToken = res.token
 	return nil
 }
 
@@ -361,8 +431,10 @@ func (r *Resolver) RefreshToken(ctx context.Context, a *RequestAuth) bool {
 	if !a.UseConfigToken || a.AccountID == "" {
 		return false
 	}
-	_ = r.Store.UpdateAccountToken(a.AccountID, "")
-	a.Account.Token = ""
+	// The stored token is intentionally NOT blanked first: loginAndPersist
+	// overwrites it on success, and a failed login must leave the previous
+	// credential in place instead of forcing every later request into its own
+	// login attempt. Concurrent refreshes are deduped by the login flight.
 	if err := r.loginAndPersist(ctx, a); err != nil {
 		config.Logger.Error("[refresh_token] failed", "account", a.AccountID, "error", err)
 		return false

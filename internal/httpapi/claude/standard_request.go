@@ -15,6 +15,15 @@ type claudeNormalizedRequest struct {
 	NormalizedMessages []any
 }
 
+// thinkingInjectionReader is the optional capability a ConfigReader may
+// implement to expose the thinking-injection preference. It is kept separate
+// from ConfigReader so store stubs that only implement the base interface
+// keep compiling (same pattern as promptcompat's stripMaxTokensReader).
+type thinkingInjectionReader interface {
+	ThinkingInjectionEnabled() bool
+	ThinkingInjectionPrompt() string
+}
+
 func normalizeClaudeRequest(store ConfigReader, req map[string]any) (claudeNormalizedRequest, error) {
 	model, _ := req["model"].(string)
 	messagesRaw, _ := req["messages"].([]any)
@@ -39,6 +48,22 @@ func normalizeClaudeRequest(store ConfigReader, req map[string]any) (claudeNorma
 	thinkingEnabled := util.ResolveThinkingEnabled(req, defaultThinkingEnabled)
 	if config.IsNoThinkingModel(dsModel) {
 		thinkingEnabled = false
+	}
+	// Thinking injection (opt-in): append the configured reasoning-effort
+	// prompt to the latest user message before the DeepSeek prompt is
+	// assembled, so the injected text lands in both the live prompt and the
+	// StandardRequest messages (which feed the current-input file). This is
+	// the same shared injection the OpenAI surfaces apply.
+	if tr, ok := store.(thinkingInjectionReader); ok && tr.ThinkingInjectionEnabled() && thinkingEnabled {
+		if current, ok := payload["messages"].([]any); ok {
+			if msgs, changed := promptcompat.AppendThinkingInjectionPromptToLatestUser(current, tr.ThinkingInjectionPrompt()); changed {
+				payload["messages"] = msgs
+				normalizedMessages = msgs
+				// convertClaudeToDeepSeek is pure: rebuild it so the system
+				// prepend and the injected messages are assembled together.
+				dsPayload = convertClaudeToDeepSeek(payload, store)
+			}
+		}
 	}
 	finalPrompt := prompt.MessagesPrepareWithThinking(toMessageMaps(dsPayload["messages"]), thinkingEnabled)
 	toolNames := extractClaudeToolNames(toolsRequested)

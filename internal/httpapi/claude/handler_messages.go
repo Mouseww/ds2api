@@ -81,7 +81,11 @@ func (h *Handler) handleClaudeDirect(w http.ResponseWriter, r *http.Request) boo
 		writeClaudeError(w, http.StatusUnauthorized, err.Error())
 		return true
 	}
-	defer h.Auth.Release(a)
+	var sessionID string
+	defer func() {
+		completionruntime.AutoDeleteRemoteSession(r.Context(), h.DS, h.Store, a, sessionID)
+		h.Auth.Release(a)
+	}()
 	stdReq, err := h.applyCurrentInputFile(r.Context(), a, norm.Standard)
 	if err != nil {
 		status, message := mapCurrentInputFileError(err)
@@ -96,13 +100,14 @@ func (h *Handler) handleClaudeDirect(w http.ResponseWriter, r *http.Request) boo
 		Standard: stdReq,
 	})
 	if stdReq.Stream {
-		h.handleClaudeDirectStream(w, r, a, stdReq, historySession)
+		h.handleClaudeDirectStream(w, r, a, stdReq, historySession, &sessionID)
 		return true
 	}
 	result, outErr := completionruntime.ExecuteNonStreamWithRetry(r.Context(), h.DS, a, stdReq, completionruntime.Options{
 		RetryEnabled:     true,
 		CurrentInputFile: h.Store,
 	})
+	sessionID = result.SessionID
 	if outErr != nil {
 		if historySession != nil {
 			historySession.ErrorTurn(outErr.Status, outErr.Message, outErr.Code, result.Turn)
@@ -133,7 +138,7 @@ func mapCurrentInputFileError(err error) (int, string) {
 	return history.MapError(err)
 }
 
-func (h *Handler) handleClaudeDirectStream(w http.ResponseWriter, r *http.Request, a *auth.RequestAuth, stdReq promptcompat.StandardRequest, historySession *responsehistory.Session) {
+func (h *Handler) handleClaudeDirectStream(w http.ResponseWriter, r *http.Request, a *auth.RequestAuth, stdReq promptcompat.StandardRequest, historySession *responsehistory.Session, sessionIDRef *string) {
 	start, outErr := completionruntime.StartCompletionWithAccountFallback(r.Context(), h.DS, a, stdReq, completionruntime.Options{
 		RetryEnabled:     true,
 		CurrentInputFile: h.Store,
@@ -144,6 +149,9 @@ func (h *Handler) handleClaudeDirectStream(w http.ResponseWriter, r *http.Reques
 		}
 		writeClaudeError(w, outErr.Status, outErr.Message)
 		return
+	}
+	if sessionIDRef != nil {
+		*sessionIDRef = start.SessionID
 	}
 	streamReq := start.Request
 	h.handleClaudeStreamRealtimeWithRetry(w, r, a, start.Response, start.Payload, start.Pow, streamReq, streamReq.ResponseModel, streamReq.Messages, streamReq.Thinking, streamReq.Search, streamReq.ToolNames, streamReq.ToolsRaw, streamReq.PromptTokenText, historySession)

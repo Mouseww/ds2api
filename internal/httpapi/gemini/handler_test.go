@@ -23,6 +23,7 @@ type testGeminiConfig struct{}
 func (testGeminiConfig) ModelAliases() map[string]string { return nil }
 func (testGeminiConfig) CurrentInputFileEnabled() bool   { return true }
 func (testGeminiConfig) CurrentInputFileMinChars() int   { return 0 }
+func (testGeminiConfig) AutoDeleteMode() string          { return "none" }
 
 type testGeminiAuth struct {
 	a   *auth.RequestAuth
@@ -81,6 +82,16 @@ func (m *testGeminiDS) CallCompletion(_ context.Context, _ *auth.RequestAuth, pa
 		return nil, m.err
 	}
 	return m.resp, nil
+}
+
+//nolint:unused // reserved test double for native Gemini DS-call path coverage.
+func (m *testGeminiDS) DeleteSessionForToken(_ context.Context, _ string, _ string) (*dsclient.DeleteSessionResult, error) {
+	return &dsclient.DeleteSessionResult{}, nil
+}
+
+//nolint:unused // reserved test double for native Gemini DS-call path coverage.
+func (m *testGeminiDS) DeleteAllSessionsForToken(context.Context, string) error {
+	return nil
 }
 
 type geminiOpenAIErrorStub struct {
