@@ -59,6 +59,9 @@ func NewApp() (*App, error) {
 	} else {
 		config.Logger.Info("[PoW] pure Go solver ready")
 	}
+	// Background monitor re-checks auto-disabled (banned) accounts once their
+	// mute expires and re-enables any whose ban was lifted.
+	resolver.StartUnbanMonitor(context.Background())
 	chatHistoryStore := chathistory.New(config.ChatHistoryPath())
 	if err := chatHistoryStore.Err(); err != nil {
 		config.Logger.Warn("[chat_history] unavailable", "path", chatHistoryStore.Path(), "error", err)

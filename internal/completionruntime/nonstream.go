@@ -1,6 +1,7 @@
 package completionruntime
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -73,6 +74,42 @@ func StartCompletion(ctx context.Context, ds DeepSeekCaller, a *auth.RequestAuth
 	return StartResult{SessionID: sessionID, Payload: payload, Pow: pow, Response: resp, Request: stdReq}, nil
 }
 
+// StartCompletionWithAccountFallback is like StartCompletion but switches to
+// another pooled account and retries once when the initial attempt fails with a
+// retryable condition (429 / captcha challenge). Non-retryable failures are
+// returned unchanged, and the response body (when present) is preserved for
+// callers that still need to render the error.
+func StartCompletionWithAccountFallback(ctx context.Context, ds DeepSeekCaller, a *auth.RequestAuth, stdReq promptcompat.StandardRequest, opts Options) (StartResult, *assistantturn.OutputError) {
+	start, outErr := StartCompletion(ctx, ds, a, stdReq, opts)
+
+	retryable := false
+	if outErr != nil {
+		retryable = outErr.Status == http.StatusTooManyRequests
+	} else if start.Response != nil && start.Response.StatusCode != http.StatusOK {
+		body, readErr := io.ReadAll(start.Response.Body)
+		if readErr != nil {
+			config.Logger.Warn("[completion_runtime_account_switch_retry] reading initial error body failed", "surface", stdReq.Surface, "error", readErr)
+		}
+		if closeErr := start.Response.Body.Close(); closeErr != nil {
+			config.Logger.Warn("[completion_runtime_account_switch_retry] closing initial error body failed", "surface", stdReq.Surface, "error", closeErr)
+		}
+		retryable = start.Response.StatusCode == http.StatusTooManyRequests || tryDetectCaptchaFromBody(body) != ""
+		// Restore the body so callers can still render the failure.
+		start.Response.Body = io.NopCloser(bytes.NewReader(body))
+	}
+
+	if !retryable || !opts.RetryEnabled || a == nil || !a.UseConfigToken {
+		return start, outErr
+	}
+
+	var switchAttempted bool
+	if !canRetryOnAlternateAccount(ctx, a, &assistantturn.OutputError{Status: http.StatusTooManyRequests, Message: "Account rate-limited, retrying on another account.", Code: "rate_limited"}, opts.RetryEnabled, &switchAttempted) {
+		return start, outErr
+	}
+	config.Logger.Info("[completion_runtime_account_switch_retry] retrying start on alternate account", "surface", stdReq.Surface, "stream", stdReq.Stream)
+	return StartCompletion(ctx, ds, a, stdReq, opts)
+}
+
 func prepareCurrentInputFile(ctx context.Context, ds DeepSeekCaller, a *auth.RequestAuth, stdReq promptcompat.StandardRequest, opts Options) (promptcompat.StandardRequest, *assistantturn.OutputError) {
 	if opts.CurrentInputFile == nil || stdReq.CurrentInputFileApplied {
 		return stdReq, nil
@@ -86,7 +123,7 @@ func prepareCurrentInputFile(ctx context.Context, ds DeepSeekCaller, a *auth.Req
 }
 
 func ExecuteNonStreamWithRetry(ctx context.Context, ds DeepSeekCaller, a *auth.RequestAuth, stdReq promptcompat.StandardRequest, opts Options) (NonStreamResult, *assistantturn.OutputError) {
-	start, startErr := StartCompletion(ctx, ds, a, stdReq, opts)
+	start, startErr := StartCompletionWithAccountFallback(ctx, ds, a, stdReq, opts)
 	if startErr != nil {
 		return NonStreamResult{SessionID: start.SessionID, Payload: start.Payload}, startErr
 	}

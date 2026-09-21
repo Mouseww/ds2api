@@ -5,8 +5,9 @@ import (
 )
 
 // applyLoginBanState inspects the ban fields a token refresh just persisted and
-// reacts to a banned account: it is auto-disabled (reason "banned") and evicted
-// from the rotation pool so no further request is allocated to it.
+// reconciles the account's enabled flag: a banned account is auto-disabled
+// (reason "banned") and evicted from the rotation pool, while a previously
+// banned account whose mute has lapsed is re-enabled.
 //
 // It reports the refreshed account and whether it is banned. Callers use the
 // return value to render the test result as a warning instead of a success.
@@ -16,6 +17,26 @@ func (h *Handler) applyLoginBanState(identifier string) (config.Account, bool) {
 		return config.Account{}, false
 	}
 	if !acc.IsBanned() {
+		// Ban lifted: restore an account that was auto-disabled by ban
+		// detection. Manual disables and already-enabled accounts are skipped.
+		if !acc.IsEnabled() && acc.DisabledReason == "banned" {
+			if err := h.Store.SetAccountEnabled(identifier, true, ""); err != nil {
+				config.Logger.Warn(
+					"[accounts] re-enable unbanned account failed",
+					"account", identifier,
+					"error", err,
+				)
+			} else {
+				h.Pool.Rebalance()
+				config.Logger.Info(
+					"[accounts] unbanned account re-enabled after token refresh",
+					"account", identifier,
+					"ban_is_muted", acc.BanIsMuted,
+					"ban_mute_until", acc.BanMuteUntil,
+					"ban_status", acc.BanStatus,
+				)
+			}
+		}
 		return acc, false
 	}
 	if acc.IsEnabled() {

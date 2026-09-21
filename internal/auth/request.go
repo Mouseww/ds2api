@@ -29,6 +29,11 @@ const (
 	// for the same account. This prevents login storms when a request is
 	// repeatedly rejected.
 	banRecheckCooldown = 60 * time.Second
+
+	// banUnbanCheckInterval is how often the background monitor scans for
+	// auto-disabled (banned) accounts whose mute timestamp has lapsed, so it
+	// can re-login and re-enable any account whose ban was lifted.
+	banUnbanCheckInterval = 60 * time.Second
 )
 
 type RequestAuth struct {
@@ -167,14 +172,16 @@ func (r *Resolver) loginAndPersist(ctx context.Context, a *RequestAuth) error {
 		return err
 	}
 	r.markTokenRefreshedNow(a.AccountID)
-	// The client persisted fresh ban fields during Login. If the account is
-	// muted, auto-disable it and clear the freshly-issued token so the request
-	// can fail over to another pooled account.
-	if acc, ok := r.Store.FindAccount(a.AccountID); ok && acc.IsBanned() {
-		a.Account.Token = ""
-		a.DeepSeekToken = ""
-		r.disableBannedAccount(a.AccountID, acc)
-		return errAccountBanned
+	// The client persisted fresh ban fields during Login. Reconcile ban state:
+	// disable if newly banned, re-enable if ban has been lifted.
+	if acc, ok := r.Store.FindAccount(a.AccountID); ok {
+		if acc.IsBanned() {
+			a.Account.Token = ""
+			a.DeepSeekToken = ""
+			r.disableBannedAccount(a.AccountID, acc)
+			return errAccountBanned
+		}
+		r.reenableIfUnbanned(a.AccountID, acc)
 	}
 	a.Account.Token = token
 	a.DeepSeekToken = token
@@ -237,6 +244,102 @@ func (r *Resolver) disableBannedAccount(accountID string, acc config.Account) {
 		"ban_mute_until", acc.BanMuteUntil,
 		"ban_status", acc.BanStatus,
 	)
+}
+
+// reenableIfUnbanned restores an account that was auto-disabled with reason
+// "banned" once a fresh login shows the mute is no longer active. Manual
+// disables and already-enabled accounts are left untouched.
+func (r *Resolver) reenableIfUnbanned(accountID string, acc config.Account) {
+	if acc.IsEnabled() || acc.DisabledReason != "banned" {
+		return
+	}
+	if r.Store != nil {
+		_ = r.Store.Update(func(c *config.Config) error {
+			for i := range c.Accounts {
+				if c.Accounts[i].Identifier() != accountID {
+					continue
+				}
+				enabled := true
+				c.Accounts[i].Enabled = &enabled
+				c.Accounts[i].DisabledReason = ""
+				return nil
+			}
+			return nil
+		})
+	}
+	if r.Pool != nil {
+		r.Pool.Rebalance()
+	}
+	config.Logger.Info(
+		"[ban_detect] account unbanned and re-enabled",
+		"account", accountID,
+		"ban_is_muted", acc.BanIsMuted,
+		"ban_mute_until", acc.BanMuteUntil,
+		"ban_status", acc.BanStatus,
+	)
+}
+
+// StartUnbanMonitor launches a background loop that periodically re-logs-in
+// for auto-disabled (banned) accounts whose mute timestamp has expired. When a
+// login confirms the ban is lifted the account is re-enabled and returned to
+// the rotation pool. The loop runs on banUnbanCheckInterval until ctx is done.
+func (r *Resolver) StartUnbanMonitor(ctx context.Context) {
+	if r == nil || r.Store == nil || r.Login == nil {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(banUnbanCheckInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				r.checkExpiredBans(ctx)
+			}
+		}
+	}()
+}
+
+// checkExpiredBans scans every account that was auto-disabled with reason
+// "banned" and whose mute timestamp has lapsed. Each eligible account is
+// logged-in to refresh ban state; if the mute is lifted the account is
+// re-enabled automatically.
+func (r *Resolver) checkExpiredBans(ctx context.Context) {
+	if r == nil || r.Store == nil || r.Login == nil {
+		return
+	}
+	nowUnix := float64(time.Now().Unix())
+	for _, acc := range r.Store.Accounts() {
+		if acc.IsEnabled() || acc.DisabledReason != "banned" {
+			continue
+		}
+		if !acc.IsBanned() {
+			// Stale state: disabled for ban but not actually banned.
+			// Restore defensively.
+			r.reenableIfUnbanned(acc.Identifier(), acc)
+			continue
+		}
+		if acc.BanMuteUntil <= 0 || nowUnix < acc.BanMuteUntil {
+			continue // no known expiry, or not yet expired
+		}
+		// Mute has expired: re-login to refresh ban status. loginAndPersist
+		// will call reenableIfUnbanned if the ban was lifted.
+		a := &RequestAuth{
+			UseConfigToken: true,
+			AccountID:      acc.Identifier(),
+			Account:        acc,
+			TriedAccounts:  map[string]bool{},
+			resolver:       r,
+		}
+		if err := r.loginAndPersist(ctx, a); err != nil {
+			if errors.Is(err, errAccountBanned) {
+				config.Logger.Debug("[ban_unban_monitor] account still banned after mute expiry", "account", acc.Identifier())
+			} else {
+				config.Logger.Warn("[ban_unban_monitor] re-check login failed", "account", acc.Identifier(), "error", err)
+			}
+		}
+	}
 }
 
 func (r *Resolver) beginBanRecheck(accountID string) bool {

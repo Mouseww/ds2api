@@ -134,7 +134,8 @@ func mapCurrentInputFileError(err error) (int, string) {
 }
 
 func (h *Handler) handleClaudeDirectStream(w http.ResponseWriter, r *http.Request, a *auth.RequestAuth, stdReq promptcompat.StandardRequest, historySession *responsehistory.Session) {
-	start, outErr := completionruntime.StartCompletion(r.Context(), h.DS, a, stdReq, completionruntime.Options{
+	start, outErr := completionruntime.StartCompletionWithAccountFallback(r.Context(), h.DS, a, stdReq, completionruntime.Options{
+		RetryEnabled:     true,
 		CurrentInputFile: h.Store,
 	})
 	if outErr != nil {

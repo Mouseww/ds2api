@@ -105,7 +105,8 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	start, outErr := completionruntime.StartCompletion(r.Context(), h.DS, a, stdReq, completionruntime.Options{
+	start, outErr := completionruntime.StartCompletionWithAccountFallback(r.Context(), h.DS, a, stdReq, completionruntime.Options{
+		RetryEnabled:     true,
 		CurrentInputFile: h.Store,
 	})
 	sessionID = start.SessionID
