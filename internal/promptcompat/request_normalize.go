@@ -12,6 +12,23 @@ type ConfigReader interface {
 	ModelAliases() map[string]string
 }
 
+// stripMaxTokensReader is the optional interface a ConfigReader may implement
+// to expose the runtime strip-max-tokens preference. It is kept separate from
+// ConfigReader so mocks that only implement ModelAliases keep compiling.
+type stripMaxTokensReader interface {
+	RuntimeStripMaxTokens() bool
+}
+
+func resolveStripMaxTokens(store ConfigReader) bool {
+	if store == nil {
+		return true
+	}
+	if r, ok := store.(stripMaxTokensReader); ok {
+		return r.RuntimeStripMaxTokens()
+	}
+	return true
+}
+
 func NormalizeOpenAIChatRequest(store ConfigReader, req map[string]any, traceID string) (StandardRequest, error) {
 	model, _ := req["model"].(string)
 	messagesRaw, _ := req["messages"].([]any)
@@ -53,6 +70,7 @@ func NormalizeOpenAIChatRequest(store ConfigReader, req map[string]any, traceID 
 		Search:          searchEnabled,
 		RefFileIDs:      refFileIDs,
 		RefFileTokens:   estimateInlineFileTokens(req),
+		StripMaxTokens:  resolveStripMaxTokens(store),
 		PassThrough:     passThrough,
 	}, nil
 }
@@ -105,6 +123,7 @@ func NormalizeOpenAIResponsesRequest(store ConfigReader, req map[string]any, tra
 		Search:          searchEnabled,
 		RefFileIDs:      refFileIDs,
 		RefFileTokens:   estimateInlineFileTokens(req),
+		StripMaxTokens:  resolveStripMaxTokens(store),
 		PassThrough:     passThrough,
 	}, nil
 }

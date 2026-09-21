@@ -22,6 +22,7 @@ type StandardRequest struct {
 	Search                  bool
 	RefFileIDs              []string
 	RefFileTokens           int
+	StripMaxTokens          bool
 	PassThrough             map[string]any
 }
 
@@ -88,6 +89,9 @@ func (r StandardRequest) CompletionPayload(sessionID string) map[string]any {
 		"preempt":           false,
 	}
 	for k, v := range r.PassThrough {
+		if r.StripMaxTokens && (k == "max_tokens" || k == "max_completion_tokens") {
+			continue
+		}
 		payload[k] = v
 	}
 	return payload

@@ -30,6 +30,8 @@ func (h *Handler) getSettings(w http.ResponseWriter, _ *http.Request) {
 			"daily_token_limit_m":          h.Store.RuntimeDailyTokenLimitM(),
 			"daily_request_limit":          h.Store.RuntimeDailyRequestLimit(),
 			"quota_window_hours":           h.Store.RuntimeQuotaWindowHours(),
+			"auto_continue_fix":            h.Store.RuntimeAutoContinueFix(),
+			"strip_max_tokens":             h.Store.RuntimeStripMaxTokens(),
 		},
 		"responses":   snap.Responses,
 		"embeddings":  snap.Embeddings,

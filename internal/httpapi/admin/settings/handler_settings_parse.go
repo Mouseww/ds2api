@@ -110,6 +110,14 @@ func parseSettingsUpdateRequest(req map[string]any) (*config.AdminConfig, *confi
 			}
 			cfg.QuotaWindowHours = n
 		}
+		if v, exists := raw["auto_continue_fix"]; exists {
+			b := boolFrom(v)
+			cfg.AutoContinueFix = &b
+		}
+		if v, exists := raw["strip_max_tokens"]; exists {
+			b := boolFrom(v)
+			cfg.StripMaxTokens = &b
+		}
 		if cfg.AccountMaxInflight > 0 && cfg.GlobalMaxInflight > 0 && cfg.GlobalMaxInflight < cfg.AccountMaxInflight {
 			return nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("runtime.global_max_inflight must be >= runtime.account_max_inflight")
 		}

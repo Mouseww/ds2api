@@ -36,6 +36,8 @@ func (h *Handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 	dailyTokenLimitSet := hasNestedSettingsKey(req, "runtime", "daily_token_limit_m")
 	dailyRequestLimitSet := hasNestedSettingsKey(req, "runtime", "daily_request_limit")
 	quotaWindowHoursSet := hasNestedSettingsKey(req, "runtime", "quota_window_hours")
+	autoContinueFixSet := hasNestedSettingsKey(req, "runtime", "auto_continue_fix")
+	stripMaxTokensSet := hasNestedSettingsKey(req, "runtime", "strip_max_tokens")
 
 	if err := h.Store.Update(func(c *config.Config) error {
 		if adminCfg != nil {
@@ -71,6 +73,12 @@ func (h *Handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 			}
 			if quotaWindowHoursSet {
 				c.Runtime.QuotaWindowHours = runtimeCfg.QuotaWindowHours
+			}
+			if autoContinueFixSet {
+				c.Runtime.AutoContinueFix = runtimeCfg.AutoContinueFix
+			}
+			if stripMaxTokensSet {
+				c.Runtime.StripMaxTokens = runtimeCfg.StripMaxTokens
 			}
 		}
 		if responsesCfg != nil && responsesCfg.StoreTTLSeconds > 0 {

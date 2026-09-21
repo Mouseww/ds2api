@@ -116,6 +116,38 @@ export default function RuntimeSection({ t, form, setForm }) {
                     <span className="text-[10px] text-muted-foreground">{t('settings.dailyRequestLimitHelp', { hours: form.runtime.quota_window_hours || 24 })}</span>
                 </label>
             </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2 border-t border-border">
+                <label className="flex items-center gap-3 text-sm cursor-pointer">
+                    <input
+                        type="checkbox"
+                        checked={form.runtime.auto_continue_fix}
+                        onChange={(e) => setForm((prev) => ({
+                            ...prev,
+                            runtime: { ...prev.runtime, auto_continue_fix: e.target.checked },
+                        }))}
+                        className="h-4 w-4 rounded border-border bg-background"
+                    />
+                    <div className="space-y-1">
+                        <span>{t('settings.autoContinueFix')}</span>
+                        <span className="block text-[10px] text-muted-foreground">{t('settings.autoContinueFixHelp')}</span>
+                    </div>
+                </label>
+                <label className="flex items-center gap-3 text-sm cursor-pointer">
+                    <input
+                        type="checkbox"
+                        checked={form.runtime.strip_max_tokens}
+                        onChange={(e) => setForm((prev) => ({
+                            ...prev,
+                            runtime: { ...prev.runtime, strip_max_tokens: e.target.checked },
+                        }))}
+                        className="h-4 w-4 rounded border-border bg-background"
+                    />
+                    <div className="space-y-1">
+                        <span>{t('settings.stripMaxTokens')}</span>
+                        <span className="block text-[10px] text-muted-foreground">{t('settings.stripMaxTokensHelp')}</span>
+                    </div>
+                </label>
+            </div>
         </div>
     )
 }

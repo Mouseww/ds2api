@@ -132,7 +132,7 @@ func TestAutoContinueDoesNotTriggerOnPlainWIPWithoutExplicitContinuationSignal(t
 	}, "\n") + "\n"
 
 	var continueCalls atomic.Int32
-	body := newAutoContinueBody(context.Background(), io.NopCloser(strings.NewReader(initialBody)), "session-123", 8, func(context.Context, string, int) (*http.Response, error) {
+	body := newAutoContinueBody(context.Background(), io.NopCloser(strings.NewReader(initialBody)), "session-123", true, 8, func(context.Context, string, int) (*http.Response, error) {
 		continueCalls.Add(1)
 		return nil, errors.New("continue should not have been called")
 	})
@@ -155,7 +155,7 @@ func TestAutoContinuePassesThroughLongSingleSSELine(t *testing.T) {
 	initialBody := `data: {"p":"response/content","v":"` + payload + `"}` + "\n" +
 		`data: [DONE]` + "\n"
 
-	body := newAutoContinueBody(context.Background(), io.NopCloser(strings.NewReader(initialBody)), "session-123", 8, func(context.Context, string, int) (*http.Response, error) {
+	body := newAutoContinueBody(context.Background(), io.NopCloser(strings.NewReader(initialBody)), "session-123", true, 8, func(context.Context, string, int) (*http.Response, error) {
 		return nil, errors.New("continue should not have been called")
 	})
 	defer func() { _ = body.Close() }()
@@ -180,7 +180,7 @@ func TestAutoContinueTriggersOnDirectQuasiStatusIncomplete(t *testing.T) {
 	}, "\n") + "\n"
 
 	var continueCalls atomic.Int32
-	body := newAutoContinueBody(context.Background(), io.NopCloser(strings.NewReader(initialBody)), "session-123", 8, func(context.Context, string, int) (*http.Response, error) {
+	body := newAutoContinueBody(context.Background(), io.NopCloser(strings.NewReader(initialBody)), "session-123", true, 8, func(context.Context, string, int) (*http.Response, error) {
 		continueCalls.Add(1)
 		return &http.Response{
 			StatusCode: http.StatusOK,
@@ -214,7 +214,7 @@ func TestAutoContinueTriggersOnResponseBatchQuasiStatusIncomplete(t *testing.T) 
 	}, "\n") + "\n"
 
 	var continueCalls atomic.Int32
-	body := newAutoContinueBody(context.Background(), io.NopCloser(strings.NewReader(initialBody)), "session-123", 8, func(context.Context, string, int) (*http.Response, error) {
+	body := newAutoContinueBody(context.Background(), io.NopCloser(strings.NewReader(initialBody)), "session-123", true, 8, func(context.Context, string, int) (*http.Response, error) {
 		continueCalls.Add(1)
 		return &http.Response{
 			StatusCode: http.StatusOK,
@@ -247,7 +247,7 @@ func TestAutoContinueDoesNotTriggerWhenResponseBatchQuasiStatusFinished(t *testi
 	}, "\n") + "\n"
 
 	var continueCalls atomic.Int32
-	body := newAutoContinueBody(context.Background(), io.NopCloser(strings.NewReader(initialBody)), "session-123", 8, func(context.Context, string, int) (*http.Response, error) {
+	body := newAutoContinueBody(context.Background(), io.NopCloser(strings.NewReader(initialBody)), "session-123", true, 8, func(context.Context, string, int) (*http.Response, error) {
 		continueCalls.Add(1)
 		return nil, errors.New("continue should not have been called")
 	})
@@ -284,7 +284,7 @@ func TestAutoContinuePreservesIncompleteStateWhenNextChunkOmitsStatus(t *testing
 	}, "\n") + "\n"
 
 	var continueCalls atomic.Int32
-	body := newAutoContinueBody(context.Background(), io.NopCloser(strings.NewReader(initialBody)), "session-123", 8, func(context.Context, string, int) (*http.Response, error) {
+	body := newAutoContinueBody(context.Background(), io.NopCloser(strings.NewReader(initialBody)), "session-123", true, 8, func(context.Context, string, int) (*http.Response, error) {
 		continueCalls.Add(1)
 		return &http.Response{
 			StatusCode: http.StatusOK,

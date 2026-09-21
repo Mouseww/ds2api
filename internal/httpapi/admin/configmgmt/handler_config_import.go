@@ -128,6 +128,12 @@ func (h *Handler) configImport(w http.ResponseWriter, r *http.Request) {
 			if incoming.Runtime.DailyRequestLimit > 0 {
 				next.Runtime.DailyRequestLimit = incoming.Runtime.DailyRequestLimit
 			}
+			if incoming.Runtime.AutoContinueFix != nil {
+				next.Runtime.AutoContinueFix = incoming.Runtime.AutoContinueFix
+			}
+			if incoming.Runtime.StripMaxTokens != nil {
+				next.Runtime.StripMaxTokens = incoming.Runtime.StripMaxTokens
+			}
 		}
 
 		normalizeSettingsConfig(&next)

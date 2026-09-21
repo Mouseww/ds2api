@@ -189,6 +189,16 @@ type RuntimeConfig struct {
 	// default. Usage that slides out of the window stops counting, so an
 	// account that hit its budget re-enters the rotation pool automatically.
 	QuotaWindowHours int `json:"quota_window_hours,omitempty"`
+	// AutoContinueFix controls the fix for premature conversation stops: when
+	// enabled, an explicit auto_continue flag overrides a FINISHED status that
+	// arrived in the same frame, so ds2api keeps pulling continuation rounds.
+	// A nil pointer means "enabled" for backward compatibility.
+	AutoContinueFix *bool `json:"auto_continue_fix,omitempty"`
+	// StripMaxTokens controls whether max_tokens / max_completion_tokens are
+	// stripped from the upstream completion payload so a downstream token cap
+	// cannot truncate the DeepSeek response mid-sentence. A nil pointer means
+	// "enabled" for backward compatibility.
+	StripMaxTokens *bool `json:"strip_max_tokens,omitempty"`
 }
 
 // DailyTokenLimit returns the per-account daily token budget in raw tokens.

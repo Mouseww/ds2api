@@ -223,6 +223,24 @@ func (s *Store) ThinkingInjectionEnabled() bool {
 	return *s.cfg.ThinkingInjection.Enabled
 }
 
+func (s *Store) RuntimeAutoContinueFix() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.cfg.Runtime.AutoContinueFix == nil {
+		return true
+	}
+	return *s.cfg.Runtime.AutoContinueFix
+}
+
+func (s *Store) RuntimeStripMaxTokens() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.cfg.Runtime.StripMaxTokens == nil {
+		return true
+	}
+	return *s.cfg.Runtime.StripMaxTokens
+}
+
 func (s *Store) ThinkingInjectionPrompt() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

@@ -25,6 +25,7 @@ type continueState struct {
 	responseMessageID int
 	lastStatus        string
 	finished          bool
+	autoContinueFix   bool
 }
 
 // wrapCompletionWithAutoContinue wraps the completion response body so that
@@ -41,8 +42,12 @@ func (c *Client) wrapCompletionWithAutoContinue(ctx context.Context, a *auth.Req
 	if sessionID == "" {
 		return resp
 	}
+	autoContinueFix := true
+	if c != nil && c.Store != nil {
+		autoContinueFix = c.Store.RuntimeAutoContinueFix()
+	}
 	config.Logger.Debug("[auto_continue] wrapping completion response", "session_id", sessionID)
-	resp.Body = newAutoContinueBody(ctx, resp.Body, sessionID, defaultAutoContinueLimit, func(ctx context.Context, sessionID string, responseMessageID int) (*http.Response, error) {
+	resp.Body = newAutoContinueBody(ctx, resp.Body, sessionID, autoContinueFix, defaultAutoContinueLimit, func(ctx context.Context, sessionID string, responseMessageID int) (*http.Response, error) {
 		return c.callContinue(ctx, a, sessionID, responseMessageID, powResp)
 	})
 	return resp
@@ -79,7 +84,7 @@ func (c *Client) callContinue(ctx context.Context, a *auth.RequestAuth, sessionI
 
 // newAutoContinueBody returns a new ReadCloser that transparently pumps
 // continuation rounds via an io.Pipe.
-func newAutoContinueBody(ctx context.Context, initial io.ReadCloser, sessionID string, maxRounds int, openContinue continueOpenFunc) io.ReadCloser {
+func newAutoContinueBody(ctx context.Context, initial io.ReadCloser, sessionID string, autoContinueFix bool, maxRounds int, openContinue continueOpenFunc) io.ReadCloser {
 	if initial == nil || strings.TrimSpace(sessionID) == "" || openContinue == nil {
 		return initial
 	}
@@ -87,7 +92,7 @@ func newAutoContinueBody(ctx context.Context, initial io.ReadCloser, sessionID s
 		maxRounds = defaultAutoContinueLimit
 	}
 	pr, pw := io.Pipe()
-	go pumpAutoContinue(ctx, pw, initial, continueState{sessionID: sessionID}, maxRounds, openContinue)
+	go pumpAutoContinue(ctx, pw, initial, continueState{sessionID: sessionID, autoContinueFix: autoContinueFix}, maxRounds, openContinue)
 	return pr
 }
 
@@ -216,7 +221,7 @@ func (s *continueState) observeDirectPatch(path string, value any) {
 		s.setStatus(asString(value))
 	case "response/auto_continue", "auto_continue":
 		if v, ok := value.(bool); ok && v {
-			s.lastStatus = "AUTO_CONTINUE"
+			s.markAutoContinue()
 		}
 	}
 }
@@ -234,7 +239,7 @@ func (s *continueState) observeResponseObject(raw any) {
 	}
 	s.setStatus(asString(response["status"]))
 	if autoContinue, ok := response["auto_continue"].(bool); ok && autoContinue {
-		s.lastStatus = "AUTO_CONTINUE"
+		s.markAutoContinue()
 	}
 }
 
@@ -264,7 +269,7 @@ func (s *continueState) observeBatchPatches(parentPath string, raw any) {
 			s.setStatus(asString(m["v"]))
 		case "response/auto_continue", "auto_continue":
 			if v, ok := m["v"].(bool); ok && v {
-				s.lastStatus = "AUTO_CONTINUE"
+				s.markAutoContinue()
 			}
 		}
 	}
@@ -299,6 +304,19 @@ func (s *continueState) shouldContinue() bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// markAutoContinue records an auto_continue signal. When the auto-continue fix
+// is enabled, it also clears any previously-set finished flag so that a
+// FINISHED status that arrived in the same frame does not prevent continuation.
+func (s *continueState) markAutoContinue() {
+	if s == nil {
+		return
+	}
+	s.lastStatus = "AUTO_CONTINUE"
+	if s.autoContinueFix {
+		s.finished = false
 	}
 }
 

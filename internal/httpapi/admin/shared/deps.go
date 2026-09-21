@@ -36,6 +36,8 @@ type ConfigStore interface {
 	RuntimeDailyTokenLimitM() int
 	RuntimeDailyRequestLimit() int
 	RuntimeQuotaWindowHours() int
+	RuntimeAutoContinueFix() bool
+	RuntimeStripMaxTokens() bool
 	AutoDeleteMode() string
 	CurrentInputFileEnabled() bool
 	CurrentInputFileMinChars() int
