@@ -13,6 +13,7 @@ import (
 	"ds2api/internal/completionruntime"
 	"ds2api/internal/config"
 	"ds2api/internal/httpapi/openai/history"
+	"ds2api/internal/httpapi/openai/shared"
 	"ds2api/internal/promptcompat"
 	"ds2api/internal/util"
 
@@ -71,41 +72,29 @@ func (h *Handler) handleVercelStreamPrepare(w http.ResponseWriter, r *http.Reque
 		writeOpenAIError(w, http.StatusBadRequest, "stream must be true")
 		return
 	}
-	stdReq, err = h.applyCurrentInputFile(r.Context(), a, stdReq)
-	if err != nil {
-		status, message := mapCurrentInputFileError(err)
-		writeOpenAIError(w, status, message)
-		return
-	}
+	stdReq = shared.ApplyThinkingInjection(h.Store, stdReq)
 
-	sessionID, err := h.DS.CreateSession(r.Context(), a, 3)
-	if err != nil {
-		if a.UseConfigToken {
-			writeOpenAIError(w, http.StatusUnauthorized, "Account token is invalid. Please re-login the account in admin.")
-		} else {
-			writeOpenAIError(w, http.StatusUnauthorized, "Invalid token. If this should be a DS2API key, add it to config.keys first.")
-		}
+	start, outErr := completionruntime.PrepareCompletion(r.Context(), h.DS, a, stdReq, completionruntime.Options{
+		CurrentInputFile: h.Store,
+	})
+	if outErr != nil {
+		writeOpenAIError(w, outErr.Status, outErr.Message)
 		return
 	}
-	powHeader, err := h.DS.GetPow(r.Context(), a, 3)
-	if err != nil {
-		writeOpenAIError(w, http.StatusUnauthorized, "Failed to get PoW (invalid token or unknown error).")
-		return
-	}
+	stdReq = start.Request
 	if strings.TrimSpace(a.DeepSeekToken) == "" {
 		writeOpenAIError(w, http.StatusUnauthorized, "Invalid token. If this should be a DS2API key, add it to config.keys first.")
 		return
 	}
 
-	payload := stdReq.CompletionPayload(sessionID)
-	leaseID := h.holdStreamLease(a, stdReq, sessionID)
+	leaseID := h.holdStreamLease(a, stdReq, start.SessionID)
 	if leaseID == "" {
 		writeOpenAIError(w, http.StatusInternalServerError, "failed to create stream lease")
 		return
 	}
 	leased = true
 	writeJSON(w, http.StatusOK, map[string]any{
-		"session_id":       sessionID,
+		"session_id":       start.SessionID,
 		"lease_id":         leaseID,
 		"model":            stdReq.ResponseModel,
 		"final_prompt":     stdReq.FinalPrompt,
@@ -113,8 +102,8 @@ func (h *Handler) handleVercelStreamPrepare(w http.ResponseWriter, r *http.Reque
 		"search_enabled":   stdReq.Search,
 		"tool_names":       stdReq.ToolNames,
 		"deepseek_token":   a.DeepSeekToken,
-		"pow_header":       powHeader,
-		"payload":          payload,
+		"pow_header":       start.Pow,
+		"payload":          start.Payload,
 	})
 }
 

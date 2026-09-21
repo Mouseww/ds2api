@@ -3,6 +3,7 @@ package completionruntime
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -31,6 +32,22 @@ type Options struct {
 	RetryEnabled          bool
 	RetryMaxAttempts      int
 	CurrentInputFile      history.CurrentInputConfigReader
+
+	// FailurePolicy owns every failure → lease decision for one request
+	// (re-check ban / refresh token / switch account, each at most once).
+	// When nil, the entry points create a fresh per-request policy; callers
+	// that drive several phases of the same request pass one shared policy
+	// so the budgets are not reset between phases.
+	FailurePolicy *FailurePolicy
+}
+
+// failurePolicyOrDefault returns the request-scoped failure policy, creating
+// a fresh one bound to the lease when the caller did not provide any.
+func (o Options) failurePolicyOrDefault(a *auth.RequestAuth) *FailurePolicy {
+	if o.FailurePolicy != nil {
+		return o.FailurePolicy
+	}
+	return NewFailurePolicy(a)
 }
 
 type NonStreamResult struct {
@@ -48,38 +65,87 @@ type StartResult struct {
 	Request   promptcompat.StandardRequest
 }
 
+// StartCompletion prepares and starts one completion attempt. The prepare
+// sequence (current-input upload, session creation, PoW) is shared with
+// PrepareCompletion and routed through the shared failure policy (see
+// failure_policy.go): a refreshed token retries the same account, a switched
+// lease restarts the sequence on the new account (re-uploading the
+// current-input file for it), and everything else maps to the same output
+// errors as before the consolidation.
 func StartCompletion(ctx context.Context, ds DeepSeekCaller, a *auth.RequestAuth, stdReq promptcompat.StandardRequest, opts Options) (StartResult, *assistantturn.OutputError) {
 	maxAttempts := opts.MaxAttempts
 	if maxAttempts <= 0 {
 		maxAttempts = 3
 	}
-	var prepErr *assistantturn.OutputError
-	stdReq, prepErr = prepareCurrentInputFile(ctx, ds, a, stdReq, opts)
-	if prepErr != nil {
-		return StartResult{Request: stdReq}, prepErr
+	policy := opts.failurePolicyOrDefault(a)
+	opts.FailurePolicy = policy
+	result, outErr := prepareCompletionForPolicy(ctx, ds, a, stdReq, opts, policy)
+	if outErr != nil {
+		return result, outErr
 	}
-	sessionID, err := ds.CreateSession(ctx, a, maxAttempts)
+	resp, err := ds.CallCompletion(ctx, a, result.Payload, result.Pow, maxAttempts)
 	if err != nil {
-		return StartResult{Request: stdReq}, authOutputError(a)
+		return StartResult{SessionID: result.SessionID, Payload: result.Payload, Pow: result.Pow, Request: result.Request}, &assistantturn.OutputError{Status: http.StatusInternalServerError, Message: "Failed to get completion.", Code: "error"}
 	}
-	pow, err := ds.GetPow(ctx, a, maxAttempts)
-	if err != nil {
-		return StartResult{SessionID: sessionID, Request: stdReq}, &assistantturn.OutputError{Status: http.StatusUnauthorized, Message: "Failed to get PoW (invalid token or unknown error).", Code: "error"}
-	}
-	payload := stdReq.CompletionPayload(sessionID)
-	resp, err := ds.CallCompletion(ctx, a, payload, pow, maxAttempts)
-	if err != nil {
-		return StartResult{SessionID: sessionID, Payload: payload, Pow: pow, Request: stdReq}, &assistantturn.OutputError{Status: http.StatusInternalServerError, Message: "Failed to get completion.", Code: "error"}
-	}
-	return StartResult{SessionID: sessionID, Payload: payload, Pow: pow, Response: resp, Request: stdReq}, nil
+	result.Response = resp
+	return result, nil
 }
 
-// StartCompletionWithAccountFallback is like StartCompletion but switches to
-// another pooled account and retries once when the initial attempt fails with a
-// retryable condition (429 / captcha challenge). Non-retryable failures are
-// returned unchanged, and the response body (when present) is preserved for
-// callers that still need to render the error.
+// retryStartAfterPolicyAction applies the shared failure policy to one start
+// step failure. It reports whether the sequence should restart (token
+// refreshed on the same account, or lease switched); when the lease switched
+// it re-uploads the applied current-input file for the new account first.
+func retryStartAfterPolicyAction(ctx context.Context, ds DeepSeekCaller, a *auth.RequestAuth, result *StartResult, opts Options, policy *FailurePolicy, failure *dsclient.RequestFailure) bool {
+	switch policy.Handle(ctx, failure) {
+	case FailureActionRetrySameAccount:
+		return true
+	case FailureActionSwitchedAccount:
+		reuploaded, prepErr := reuploadCurrentInputFileForAccount(ctx, ds, a, result.Request, opts)
+		if prepErr != nil {
+			return false
+		}
+		result.Request = reuploaded
+		return true
+	default:
+		return false
+	}
+}
+
+// requestFailureFromError extracts the typed *RequestFailure carried by a
+// client RPC error, or nil when the error has no policy-relevant kind.
+func requestFailureFromError(err error) *dsclient.RequestFailure {
+	var failure *dsclient.RequestFailure
+	if errors.As(err, &failure) {
+		return failure
+	}
+	return nil
+}
+
+// prepareCurrentInputFileForPolicy is the kind-preserving variant of
+// prepareCurrentInputFile used by the policy-driven start sequence: it also
+// returns the typed *RequestFailure (when the upload failed with one) so the
+// shared failure policy can decide the lease action.
+func prepareCurrentInputFileForPolicy(ctx context.Context, ds DeepSeekCaller, a *auth.RequestAuth, stdReq promptcompat.StandardRequest, opts Options) (promptcompat.StandardRequest, *dsclient.RequestFailure, *assistantturn.OutputError) {
+	if opts.CurrentInputFile == nil || stdReq.CurrentInputFileApplied {
+		return stdReq, nil, nil
+	}
+	out, err := (history.Service{Store: opts.CurrentInputFile, DS: ds}).ApplyCurrentInputFile(ctx, a, stdReq)
+	if err != nil {
+		status, message := history.MapError(err)
+		return out, requestFailureFromError(err), &assistantturn.OutputError{Status: status, Message: message, Code: "error"}
+	}
+	return out, nil, nil
+}
+
+// StartCompletionWithAccountFallback is like StartCompletion but retries on
+// another pooled account when the initial attempt fails with a retryable
+// condition (429 / captcha challenge). The switch itself goes through the
+// shared failure policy (ban re-check first, at most one switch per request).
+// Non-retryable failures are returned unchanged, and the response body (when
+// present) is preserved for callers that still need to render the error.
 func StartCompletionWithAccountFallback(ctx context.Context, ds DeepSeekCaller, a *auth.RequestAuth, stdReq promptcompat.StandardRequest, opts Options) (StartResult, *assistantturn.OutputError) {
+	policy := opts.failurePolicyOrDefault(a)
+	opts.FailurePolicy = policy
 	start, outErr := StartCompletion(ctx, ds, a, stdReq, opts)
 
 	retryable := false
@@ -103,7 +169,7 @@ func StartCompletionWithAccountFallback(ctx context.Context, ds DeepSeekCaller, 
 	}
 
 	var switchAttempted bool
-	if !canRetryOnAlternateAccount(ctx, a, &assistantturn.OutputError{Status: http.StatusTooManyRequests, Message: "Account rate-limited, retrying on another account.", Code: "rate_limited"}, opts.RetryEnabled, &switchAttempted) {
+	if !switchForRateLimited(ctx, policy, opts.RetryEnabled, &switchAttempted) {
 		return start, outErr
 	}
 	config.Logger.Info("[completion_runtime_account_switch_retry] retrying start on alternate account", "surface", stdReq.Surface, "stream", stdReq.Stream)
@@ -123,6 +189,9 @@ func prepareCurrentInputFile(ctx context.Context, ds DeepSeekCaller, a *auth.Req
 }
 
 func ExecuteNonStreamWithRetry(ctx context.Context, ds DeepSeekCaller, a *auth.RequestAuth, stdReq promptcompat.StandardRequest, opts Options) (NonStreamResult, *assistantturn.OutputError) {
+	// One shared failure policy per request: the start phase and the
+	// collect/retry phase share the re-check / refresh / switch budgets.
+	opts.FailurePolicy = opts.failurePolicyOrDefault(a)
 	start, startErr := StartCompletionWithAccountFallback(ctx, ds, a, stdReq, opts)
 	if startErr != nil {
 		return NonStreamResult{SessionID: start.SessionID, Payload: start.Payload}, startErr
@@ -136,6 +205,7 @@ func ExecuteNonStreamStartedWithRetry(ctx context.Context, ds DeepSeekCaller, a 
 	if maxAttempts <= 0 {
 		maxAttempts = 3
 	}
+	policy := opts.failurePolicyOrDefault(a)
 	sessionID := start.SessionID
 	payload := start.Payload
 	pow := start.Pow
@@ -150,7 +220,7 @@ func ExecuteNonStreamStartedWithRetry(ctx context.Context, ds DeepSeekCaller, a 
 	for {
 		turn, outErr := collectAttempt(currentResp, stdReq, usagePrompt, opts)
 		if outErr != nil {
-			if canRetryOnAlternateAccount(ctx, a, outErr, opts.RetryEnabled, &accountSwitchAttempted) {
+			if canRetryOnAlternateAccount(ctx, policy, outErr, opts.RetryEnabled, &accountSwitchAttempted) {
 				switched, switchErr := startStandardCompletionOnAlternateAccount(ctx, ds, a, stdReq, opts, maxAttempts)
 				if switchErr != nil {
 					return NonStreamResult{SessionID: sessionID, Payload: payload, Attempts: attempts}, switchErr
@@ -190,7 +260,7 @@ func ExecuteNonStreamStartedWithRetry(ctx context.Context, ds DeepSeekCaller, a 
 			retryMax = shared.EmptyOutputRetryMaxAttempts()
 		}
 		if !opts.RetryEnabled || !assistantturn.ShouldRetryEmptyOutput(turn, attempts, retryMax) {
-			if canRetryOnAlternateAccount(ctx, a, turn.Error, opts.RetryEnabled, &accountSwitchAttempted) {
+			if canRetryOnAlternateAccount(ctx, policy, turn.Error, opts.RetryEnabled, &accountSwitchAttempted) {
 				switched, switchErr := startStandardCompletionOnAlternateAccount(ctx, ds, a, stdReq, opts, maxAttempts)
 				if switchErr != nil {
 					return NonStreamResult{SessionID: sessionID, Payload: payload, Turn: turn, Attempts: attempts}, switchErr
@@ -228,18 +298,28 @@ func ExecuteNonStreamStartedWithRetry(ctx context.Context, ds DeepSeekCaller, a 
 	}
 }
 
-func canRetryOnAlternateAccount(ctx context.Context, a *auth.RequestAuth, outErr *assistantturn.OutputError, retryEnabled bool, attempted *bool) bool {
+// canRetryOnAlternateAccount reports whether a 429-mapped rejection should
+// retry on another pooled account, applying the shared failure policy: the
+// rate-limited account gets a cooldown-guarded ban re-check first, then the
+// guarded one-switch-per-request lease switch. attempted is set on the first
+// call regardless of outcome (one-shot semantics).
+func canRetryOnAlternateAccount(ctx context.Context, policy *FailurePolicy, outErr *assistantturn.OutputError, retryEnabled bool, attempted *bool) bool {
 	if outErr == nil || outErr.Status != http.StatusTooManyRequests {
 		return false
 	}
+	return switchForRateLimited(ctx, policy, retryEnabled, attempted)
+}
+
+// switchForRateLimited applies the shared failure policy to a 429 / captcha
+// rejection of the completion response itself and reports whether the lease
+// was switched for a fresh retry. Direct-token requests never switch (the
+// policy fails them without touching the lease).
+func switchForRateLimited(ctx context.Context, policy *FailurePolicy, retryEnabled bool, attempted *bool) bool {
 	if !retryEnabled || attempted == nil || *attempted {
 		return false
 	}
-	if a == nil || !a.UseConfigToken {
-		return false
-	}
 	*attempted = true
-	return a.SwitchAccount(ctx)
+	return policy.Handle(ctx, RateLimitedFailure("completion")) == FailureActionSwitchedAccount
 }
 
 func startStandardCompletionOnAlternateAccount(ctx context.Context, ds DeepSeekCaller, a *auth.RequestAuth, stdReq promptcompat.StandardRequest, opts Options, maxAttempts int) (StartResult, *assistantturn.OutputError) {

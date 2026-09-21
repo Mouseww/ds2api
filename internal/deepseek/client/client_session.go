@@ -32,7 +32,9 @@ type SessionStats struct {
 	ErrorMessage   string // 错误信息
 }
 
-// GetSessionCount 获取单个账号的会话数量
+// GetSessionCount 获取单个账号的会话数量。Policy-free：鉴权 / 429 拒绝返回
+// 类型化 *RequestFailure 交给共享失败策略（internal/completionruntime），
+// 不在此处刷新 token 或切换账号；网络错误与未知失败按 maxAttempts 同账号重试。
 func (c *Client) GetSessionCount(ctx context.Context, a *auth.RequestAuth, maxAttempts int) (*SessionStats, error) {
 	if maxAttempts <= 0 {
 		maxAttempts = c.maxRetries
@@ -44,7 +46,6 @@ func (c *Client) GetSessionCount(ctx context.Context, a *auth.RequestAuth, maxAt
 	}
 
 	attempts := 0
-	refreshed := false
 
 	for attempts < maxAttempts {
 		headers := c.authHeaders(a.DeepSeekToken)
@@ -85,18 +86,10 @@ func (c *Client) GetSessionCount(ctx context.Context, a *auth.RequestAuth, maxAt
 		stats.ErrorMessage = fmt.Sprintf("status=%d, code=%d, msg=%s", status, code, msg)
 		config.Logger.Warn("[get_session_count] failed", "status", status, "code", code, "biz_code", bizCode, "msg", msg, "biz_msg", bizMsg, "account", a.AccountID)
 
-		if a.UseConfigToken {
-			if isTokenInvalid(status, code, bizCode, msg, bizMsg) && !refreshed {
-				if c.Auth.RefreshToken(ctx, a) {
-					refreshed = true
-					continue
-				}
-			}
-			if c.Auth.SwitchAccount(ctx, a) {
-				refreshed = false
-				attempts++
-				continue
-			}
+		if failure := classifyResponseFailure("get session count", status, code, bizCode, msg, bizMsg, a.UseConfigToken); failure != nil {
+			stats.Success = false
+			stats.ErrorMessage = failure.Error()
+			return stats, failure
 		}
 		attempts++
 	}

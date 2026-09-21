@@ -32,7 +32,7 @@
 | 封禁状态持久化 | `internal/config/store.go` `UpdateAccountBanStatus` | 已按 identifier 定位并 `saveLocked` |
 | captcha 检测 | `internal/deepseek/client/captcha.go` `DetectCaptchaChallenge` | 递归扫描响应，返回挑战对象 |
 | captcha→429 映射 | `internal/completionruntime/nonstream.go` `collectAttempt`、`internal/completionruntime/stream_retry.go` | 已把 captcha 失败映射为 `429 / captcha_required` 并触发换账号 |
-| 鉴权失败→重登 | `internal/auth/request.go` `RefreshToken`；`internal/deepseek/client/client_auth.go` `isTokenInvalid`/`shouldAttemptRefresh` | 401/403、`40001/40002/40003`、token/expired/not-login 等触发重新登录 |
+| 鉴权失败→重登 | `internal/auth/request.go` `RefreshToken`；`internal/deepseek/client/client_auth.go` `isTokenInvalid`/`classifyResponseFailure` | 401/403、`40001/40002/40003`、token/expired/not-login 等被分类为类型化失败，由共享失败策略（`internal/completionruntime/failure_policy.go`）触发重新登录/切号 |
 | 负载池 | `internal/account/pool_core.go` / `pool_acquire.go` / `pool_limits.go` | `Reset()` 把所有账号装入 queue，`Acquire*` 按 queue 分配，`Status()` 暴露运行状态 |
 | Admin 账号 CRUD | `internal/httpapi/admin/accounts/*` | `GET/POST/PUT/DELETE /admin/accounts`、`GET /admin/queue/status` |
 | 运行设置读写 | `internal/httpapi/admin/settings/*` | `GET/PUT /admin/settings`，`runtime` 段包含 `account_max_inflight` 等 |
@@ -61,7 +61,7 @@
 2. **HTTP 429**：上游返回 `429 Too Many Requests`（或已被映射为 429 的 rate-limit/风控失败）。
 3. **鉴权失败**：满足现有 `isTokenInvalid(...)` 的判定（HTTP 401/403；`code/biz_code` ∈ `{40001,40002,40003}`；或消息含 `token`/`unauthorized`/`expired`/`not login`/`login required`/`invalid jwt` 等）。
 
-> 注：触发点判断逻辑当前分散在 `completionruntime` 与 `deepseek/client`。实现时把「是否触发封禁复查」收敛为一处共享判断，避免各协议适配器各自实现（遵循仓库 `AGENTS.md` 的协议适配器边界原则）。
+> 注：触发点判断逻辑已收敛为一处共享实现：`internal/completionruntime/failure_policy.go`（`FailurePolicy.Handle` / `HandleUpstreamFailure`）。DeepSeek client RPC（`CreateSession` / `GetPow` / `UploadFile` / 会话操作）不再在内部做 RecheckBan / RefreshToken / SwitchAccount，而是把 captcha / 429 / 鉴权失败返回为类型化 `RequestFailure`，由该共享策略统一决定「封禁复查（带冷却）→ 刷新 token（同账号重试）→ 切换账号」，且每个请求各动作至多一次；`auth.Resolver.SwitchAccount` 另有一次性守卫，保证一个请求至多成功切换一次账号（避免 client 层与 runtime 层重复切号烧掉两个账号）。completionruntime 的非流式/流式重试循环与各协议适配器均调用该策略，不再各自实现（遵循仓库 `AGENTS.md` 的协议适配器边界原则）。
 
 #### 2.2 复查流程（按账号执行，带冷却）
 对触发点命中的账号 `A`：

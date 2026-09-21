@@ -45,6 +45,13 @@ type RequestAuth struct {
 	Account        config.Account
 	TriedAccounts  map[string]bool
 	resolver       *Resolver
+
+	// switched guards that one request burns at most one account switch: the
+	// failure-driven switch used to live in several retry loops at once (the
+	// DeepSeek client and the completion runtime), so a single rejected
+	// request could hop through two different pooled accounts. It is set on
+	// the first successful SwitchAccount and never reset for this lease.
+	switched bool
 }
 
 type LoginFunc func(ctx context.Context, acc config.Account) (string, error)
@@ -459,6 +466,13 @@ func (r *Resolver) SwitchAccount(ctx context.Context, a *RequestAuth) bool {
 	if strings.TrimSpace(a.TargetAccount) != "" {
 		return false
 	}
+	// One successful switch per request: without this guard, a request whose
+	// failure is observed by two different retry loops (for example the client
+	// RPC layer and the completion runtime) would burn a second pooled
+	// account for the same rejection.
+	if a.switched {
+		return false
+	}
 	if a.TriedAccounts == nil {
 		a.TriedAccounts = map[string]bool{}
 	}
@@ -478,6 +492,7 @@ func (r *Resolver) SwitchAccount(ctx context.Context, a *RequestAuth) bool {
 			r.Pool.Release(a.AccountID)
 			continue
 		}
+		a.switched = true
 		return true
 	}
 }
@@ -487,6 +502,26 @@ func (a *RequestAuth) SwitchAccount(ctx context.Context) bool {
 		return false
 	}
 	return a.resolver.SwitchAccount(ctx, a)
+}
+
+// RecheckBan exposes the resolver's cooldown-guarded ban re-check through the
+// request lease so the shared failure policy (completionruntime) can drive it
+// the same way as SwitchAccount.
+func (a *RequestAuth) RecheckBan(ctx context.Context) (banned bool, refreshed bool) {
+	if a == nil || a.resolver == nil {
+		return false, false
+	}
+	return a.resolver.RecheckBan(ctx, a)
+}
+
+// RefreshToken exposes the resolver's singleflight token refresh through the
+// request lease so the shared failure policy (completionruntime) can drive it
+// the same way as SwitchAccount.
+func (a *RequestAuth) RefreshToken(ctx context.Context) bool {
+	if a == nil || a.resolver == nil {
+		return false
+	}
+	return a.resolver.RefreshToken(ctx, a)
 }
 
 func (r *Resolver) Release(a *RequestAuth) {

@@ -18,7 +18,9 @@ type DeleteSessionResult struct {
 	ErrorMessage string // 错误信息
 }
 
-// DeleteSession 删除单个会话
+// DeleteSession 删除单个会话。Policy-free：鉴权 / 429 拒绝返回类型化
+// *RequestFailure 交给共享失败策略（internal/completionruntime），不在此处
+// 刷新 token 或切换账号；网络错误与未知失败按 maxAttempts 同账号重试。
 func (c *Client) DeleteSession(ctx context.Context, a *auth.RequestAuth, sessionID string, maxAttempts int) (*DeleteSessionResult, error) {
 	if maxAttempts <= 0 {
 		maxAttempts = c.maxRetries
@@ -35,7 +37,6 @@ func (c *Client) DeleteSession(ctx context.Context, a *auth.RequestAuth, session
 	}
 
 	attempts := 0
-	refreshed := false
 
 	for attempts < maxAttempts {
 		headers := c.authHeaders(a.DeepSeekToken)
@@ -60,18 +61,10 @@ func (c *Client) DeleteSession(ctx context.Context, a *auth.RequestAuth, session
 		result.ErrorMessage = fmt.Sprintf("status=%d, code=%d, msg=%s", status, code, msg)
 		config.Logger.Warn("[delete_session] failed", "status", status, "code", code, "biz_code", bizCode, "msg", msg, "biz_msg", bizMsg, "session_id", sessionID)
 
-		if a.UseConfigToken {
-			if isTokenInvalid(status, code, bizCode, msg, bizMsg) && !refreshed {
-				if c.Auth.RefreshToken(ctx, a) {
-					refreshed = true
-					continue
-				}
-			}
-			if c.Auth.SwitchAccount(ctx, a) {
-				refreshed = false
-				attempts++
-				continue
-			}
+		if failure := classifyResponseFailure("delete session", status, code, bizCode, msg, bizMsg, a.UseConfigToken); failure != nil {
+			result.Success = false
+			result.ErrorMessage = failure.Error()
+			return result, failure
 		}
 		attempts++
 	}

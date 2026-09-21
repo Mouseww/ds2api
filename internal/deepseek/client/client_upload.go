@@ -39,6 +39,11 @@ type UploadFileResult struct {
 	RawHeaders http.Header
 }
 
+// UploadFile uploads one file to DeepSeek. It is policy-free: auth / 429
+// rejections return a typed *RequestFailure for the shared failure policy
+// (internal/completionruntime) instead of refreshing or switching accounts
+// here. Network errors and unknown failures retry on the same account up to
+// maxAttempts.
 func (c *Client) UploadFile(ctx context.Context, a *auth.RequestAuth, req UploadFileRequest, maxAttempts int) (*UploadFileResult, error) {
 	if maxAttempts <= 0 {
 		maxAttempts = c.maxRetries
@@ -71,10 +76,7 @@ func (c *Client) UploadFile(ctx context.Context, a *auth.RequestAuth, req Upload
 	}
 	captureSession := c.capture.Start("deepseek_upload_file", dsprotocol.DeepSeekUploadFileURL, a.AccountID, capturePayload)
 	attempts := 0
-	refreshed := false
 	powHeader := ""
-	lastFailureKind := FailureUnknown
-	lastFailureMessage := ""
 	for attempts < maxAttempts {
 		clients := c.requestClientsForAuth(ctx, a)
 		if strings.TrimSpace(powHeader) == "" {
@@ -140,30 +142,10 @@ func (c *Client) UploadFile(ctx context.Context, a *auth.RequestAuth, req Upload
 		}
 		config.Logger.Warn("[upload_file] failed", "status", resp.StatusCode, "code", code, "biz_code", bizCode, "msg", msg, "biz_msg", bizMsg, "account", a.AccountID, "filename", filename)
 		powHeader = ""
-		lastFailureMessage = failureMessage(msg, bizMsg, "upload file failed")
-		if isTokenInvalid(resp.StatusCode, code, bizCode, msg, bizMsg) || isAuthIndicativeBizFailure(msg, bizMsg) {
-			lastFailureKind = authFailureKind(a.UseConfigToken)
-		} else {
-			lastFailureKind = FailureUnknown
-		}
-		if a.UseConfigToken {
-			if !refreshed && shouldAttemptRefresh(resp.StatusCode, code, bizCode, msg, bizMsg) {
-				if c.Auth.RefreshToken(ctx, a) {
-					refreshed = true
-					attempts++
-					continue
-				}
-			}
-			if c.Auth.SwitchAccount(ctx, a) {
-				refreshed = false
-				attempts++
-				continue
-			}
+		if failure := classifyResponseFailure("upload file", resp.StatusCode, code, bizCode, msg, bizMsg, a.UseConfigToken); failure != nil {
+			return nil, failure
 		}
 		attempts++
-	}
-	if lastFailureKind != FailureUnknown {
-		return nil, &RequestFailure{Op: "upload file", Kind: lastFailureKind, Message: lastFailureMessage}
 	}
 	return nil, errors.New("upload file failed")
 }

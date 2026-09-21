@@ -193,13 +193,18 @@ func (c *Client) reportClientSettingsAfterLogin(ctx context.Context, a *auth.Req
 	}
 }
 
+// CreateSession creates one DeepSeek chat session. It is policy-free: on a
+// captcha / rate-limit / auth rejection it returns a typed *RequestFailure
+// and never mutates the lease (no RecheckBan / RefreshToken / SwitchAccount);
+// the shared failure policy in internal/completionruntime decides what
+// happens to the lease. Network errors and unknown server failures are
+// retried on the same account up to maxAttempts.
 func (c *Client) CreateSession(ctx context.Context, a *auth.RequestAuth, maxAttempts int) (string, error) {
 	if maxAttempts <= 0 {
 		maxAttempts = c.maxRetries
 	}
 	clients := c.requestClientsForAuth(ctx, a)
 	attempts := 0
-	refreshed := false
 	for attempts < maxAttempts {
 		headers := c.authHeaders(a.DeepSeekToken)
 		resp, status, err := c.postJSONWithStatus(ctx, clients.regular, clients.fallback, dsprotocol.DeepSeekCreateSessionURL, headers, map[string]any{})
@@ -217,52 +222,26 @@ func (c *Client) CreateSession(ctx context.Context, a *auth.RequestAuth, maxAtte
 		}
 		if ch := DetectCaptchaChallenge(resp); ch != nil {
 			config.Logger.Warn("[create_session] captcha challenge detected, account should be cooled down", "account", a.AccountID, "instruction", ch.Instruction, "image_url", ch.ImageURL, "rid", ch.Rid)
-			if a.UseConfigToken {
-				if c.Auth != nil {
-					c.Auth.RecheckBan(ctx, a)
-				}
-				if c.Auth.SwitchAccount(ctx, a) {
-					refreshed = false
-					attempts++
-					continue
-				}
-			}
 			return "", &RequestFailure{Op: "create session", Kind: FailureCaptchaRequired, Message: failureMessage(msg, bizMsg, "captcha challenge required")}
 		}
 		config.Logger.Warn("[create_session] failed", "status", status, "code", code, "biz_code", bizCode, "msg", msg, "biz_msg", bizMsg, "use_config_token", a.UseConfigToken, "account", a.AccountID)
-		if a.UseConfigToken {
-			if shouldRecheckBan(status, code, bizCode, msg, bizMsg, false) {
-				if c.Auth != nil {
-					_, rechecked := c.Auth.RecheckBan(ctx, a)
-					if rechecked && shouldAttemptRefresh(status, code, bizCode, msg, bizMsg) {
-						// Token was already refreshed by RecheckBan; skip
-						// the explicit token refresh below to avoid a
-						// redundant login.
-						refreshed = true
-					}
-				}
-			}
-			if !refreshed && shouldAttemptRefresh(status, code, bizCode, msg, bizMsg) {
-				if c.Auth.RefreshToken(ctx, a) {
-					refreshed = true
-					continue
-				}
-			}
-			if c.Auth.SwitchAccount(ctx, a) {
-				refreshed = false
-				attempts++
-				continue
-			}
+		if failure := classifyResponseFailure("create session", status, code, bizCode, msg, bizMsg, a.UseConfigToken); failure != nil {
+			return "", failure
 		}
 		attempts++
 	}
 	return "", errors.New("create session failed")
 }
 
+// GetPow fetches and solves the PoW challenge for the completion target path.
 func (c *Client) GetPow(ctx context.Context, a *auth.RequestAuth, maxAttempts int) (string, error) {
 	return c.GetPowForTarget(ctx, a, dsprotocol.DeepSeekCompletionTargetPath, maxAttempts)
 }
 
+// GetPowForTarget is policy-free like CreateSession: captcha / rate-limit /
+// auth rejections return a typed *RequestFailure for the shared failure
+// policy, while network errors and unknown failures retry on the same
+// account up to maxAttempts.
 func (c *Client) GetPowForTarget(ctx context.Context, a *auth.RequestAuth, targetPath string, maxAttempts int) (string, error) {
 	if maxAttempts <= 0 {
 		maxAttempts = c.maxRetries
@@ -273,9 +252,6 @@ func (c *Client) GetPowForTarget(ctx context.Context, a *auth.RequestAuth, targe
 	}
 	clients := c.requestClientsForAuth(ctx, a)
 	attempts := 0
-	refreshed := false
-	lastFailureKind := FailureUnknown
-	lastFailureMessage := ""
 	for attempts < maxAttempts {
 		if c.powCache != nil {
 			if cachedChallenge, ok := c.powCache.get(a.AccountID, targetPath); ok {
@@ -292,8 +268,6 @@ func (c *Client) GetPowForTarget(ctx context.Context, a *auth.RequestAuth, targe
 		resp, status, err := c.postJSONWithStatus(ctx, clients.regular, clients.fallback, dsprotocol.DeepSeekCreatePowURL, headers, map[string]any{"target_path": targetPath})
 		if err != nil {
 			config.Logger.Warn("[get_pow] request error", "error", err, "account", a.AccountID, "target_path", targetPath)
-			lastFailureKind = FailureUnknown
-			lastFailureMessage = err.Error()
 			attempts++
 			continue
 		}
@@ -312,53 +286,13 @@ func (c *Client) GetPowForTarget(ctx context.Context, a *auth.RequestAuth, targe
 		}
 		if ch := DetectCaptchaChallenge(resp); ch != nil {
 			config.Logger.Warn("[get_pow] captcha challenge detected, account should be cooled down", "account", a.AccountID, "target_path", targetPath, "instruction", ch.Instruction, "image_url", ch.ImageURL, "rid", ch.Rid)
-			lastFailureKind = FailureCaptchaRequired
-			lastFailureMessage = failureMessage(msg, bizMsg, "captcha challenge required")
-			if a.UseConfigToken {
-				if c.Auth != nil {
-					c.Auth.RecheckBan(ctx, a)
-				}
-				if c.Auth.SwitchAccount(ctx, a) {
-					refreshed = false
-					attempts++
-					continue
-				}
-			}
-			attempts++
-			continue
+			return "", &RequestFailure{Op: "get pow", Kind: FailureCaptchaRequired, Message: failureMessage(msg, bizMsg, "captcha challenge required")}
 		}
 		config.Logger.Warn("[get_pow] failed", "status", status, "code", code, "biz_code", bizCode, "msg", msg, "biz_msg", bizMsg, "use_config_token", a.UseConfigToken, "account", a.AccountID, "target_path", targetPath)
-		lastFailureMessage = failureMessage(msg, bizMsg, "get pow failed")
-		if isTokenInvalid(status, code, bizCode, msg, bizMsg) || isAuthIndicativeBizFailure(msg, bizMsg) {
-			lastFailureKind = authFailureKind(a.UseConfigToken)
-		} else {
-			lastFailureKind = FailureUnknown
-		}
-		if a.UseConfigToken {
-			if shouldRecheckBan(status, code, bizCode, msg, bizMsg, false) {
-				if c.Auth != nil {
-					_, rechecked := c.Auth.RecheckBan(ctx, a)
-					if rechecked && shouldAttemptRefresh(status, code, bizCode, msg, bizMsg) {
-						refreshed = true
-					}
-				}
-			}
-			if !refreshed && shouldAttemptRefresh(status, code, bizCode, msg, bizMsg) {
-				if c.Auth.RefreshToken(ctx, a) {
-					refreshed = true
-					continue
-				}
-			}
-			if c.Auth.SwitchAccount(ctx, a) {
-				refreshed = false
-				attempts++
-				continue
-			}
+		if failure := classifyResponseFailure("get pow", status, code, bizCode, msg, bizMsg, a.UseConfigToken); failure != nil {
+			return "", failure
 		}
 		attempts++
-	}
-	if lastFailureKind != FailureUnknown {
-		return "", &RequestFailure{Op: "get pow", Kind: lastFailureKind, Message: lastFailureMessage}
 	}
 	return "", errors.New("get pow failed")
 }
@@ -388,28 +322,20 @@ func isTokenInvalid(status int, code int, bizCode int, msg string, bizMsg string
 		strings.Contains(msg, "invalid jwt")
 }
 
-func shouldAttemptRefresh(status int, code int, bizCode int, msg string, bizMsg string) bool {
-	if isTokenInvalid(status, code, bizCode, msg, bizMsg) {
-		return true
-	}
-	// Some DeepSeek failures come back as HTTP 200/code=0 but with non-zero biz_code.
-	// Only attempt refresh when these biz failures still look auth-related.
-	return status == http.StatusOK &&
-		code == 0 &&
-		bizCode != 0 &&
-		isAuthIndicativeBizFailure(msg, bizMsg)
-}
-
-// shouldRecheckBan reports whether a rejected request (captcha / 429 / auth
-// failure) should trigger a ban re-check via a fresh login.
-func shouldRecheckBan(status int, code int, bizCode int, msg string, bizMsg string, captcha bool) bool {
-	if captcha {
-		return true
+// classifyResponseFailure maps a rejected DeepSeek response to the typed
+// RequestFailure that the shared failure policy (internal/completionruntime)
+// acts on. Auth-indicative failures become managed/direct unauthorized,
+// HTTP 429 becomes rate-limited. It returns nil for failures the policy
+// cannot act on (unknown server errors), which stay in the RPC's own
+// same-account transport retry loop.
+func classifyResponseFailure(op string, status int, code int, bizCode int, msg string, bizMsg string, useConfigToken bool) *RequestFailure {
+	if isTokenInvalid(status, code, bizCode, msg, bizMsg) || isAuthIndicativeBizFailure(msg, bizMsg) {
+		return &RequestFailure{Op: op, Kind: authFailureKind(useConfigToken), Message: failureMessage(msg, bizMsg, op+" failed")}
 	}
 	if status == http.StatusTooManyRequests {
-		return true
+		return &RequestFailure{Op: op, Kind: FailureRateLimited, Message: failureMessage(msg, bizMsg, op+" failed")}
 	}
-	return isTokenInvalid(status, code, bizCode, msg, bizMsg)
+	return nil
 }
 
 func isAuthIndicativeBizFailure(msg string, bizMsg string) bool {

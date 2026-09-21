@@ -12,6 +12,7 @@ const (
 	FailureDirectUnauthorized  FailureKind = "direct_unauthorized"
 	FailureManagedUnauthorized FailureKind = "managed_unauthorized"
 	FailureCaptchaRequired     FailureKind = "captcha_required"
+	FailureRateLimited         FailureKind = "rate_limited"
 )
 
 type RequestFailure struct {

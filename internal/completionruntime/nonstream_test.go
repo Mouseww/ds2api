@@ -20,6 +20,9 @@ type fakeDeepSeekCaller struct {
 	uploads            []dsclient.UploadFileRequest
 	completionAccounts []string
 	sessionByAccount   bool
+	createSessionErrs  []error
+	createSessionCalls []string
+	uploadErrs         []error
 }
 
 type currentInputRuntimeConfig struct{}
@@ -28,6 +31,14 @@ func (currentInputRuntimeConfig) CurrentInputFileEnabled() bool { return true }
 func (currentInputRuntimeConfig) CurrentInputFileMinChars() int { return 0 }
 
 func (f *fakeDeepSeekCaller) CreateSession(_ context.Context, a *auth.RequestAuth, _ int) (string, error) {
+	if a != nil {
+		f.createSessionCalls = append(f.createSessionCalls, a.AccountID)
+	}
+	if len(f.createSessionErrs) > 0 {
+		err := f.createSessionErrs[0]
+		f.createSessionErrs = f.createSessionErrs[1:]
+		return "", err
+	}
 	if f.sessionByAccount && a != nil && a.AccountID != "" {
 		return "session-" + a.AccountID, nil
 	}
@@ -40,6 +51,11 @@ func (f *fakeDeepSeekCaller) GetPow(context.Context, *auth.RequestAuth, int) (st
 
 func (f *fakeDeepSeekCaller) UploadFile(_ context.Context, a *auth.RequestAuth, req dsclient.UploadFileRequest, _ int) (*dsclient.UploadFileResult, error) {
 	f.uploads = append(f.uploads, req)
+	if len(f.uploadErrs) > 0 {
+		err := f.uploadErrs[0]
+		f.uploadErrs = f.uploadErrs[1:]
+		return nil, err
+	}
 	if a != nil && a.AccountID != "" {
 		return &dsclient.UploadFileResult{ID: "file-runtime-" + a.AccountID}, nil
 	}

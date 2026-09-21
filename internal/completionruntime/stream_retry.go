@@ -55,6 +55,11 @@ func ExecuteStreamWithRetry(ctx context.Context, ds DeepSeekCaller, a *auth.Requ
 
 	attempts := 0
 	accountSwitchAttempted := false
+	// The stream retry loop owns its own request-scoped failure policy: the
+	// auth-layer guard already makes a second switch impossible even if the
+	// start phase switched before, and a fresh policy lets the 429 re-check
+	// target whichever account is now leased.
+	policy := NewFailurePolicy(a)
 	currentResp := initialResp
 	currentPayload := clonePayload(payload)
 	for {
@@ -74,7 +79,7 @@ func ExecuteStreamWithRetry(ctx context.Context, ds DeepSeekCaller, a *auth.Requ
 		}
 
 		if attempts >= retryMax {
-			if canRetryOnAlternateAccount(ctx, a, &assistantturn.OutputError{Status: http.StatusTooManyRequests}, opts.RetryEnabled, &accountSwitchAttempted) {
+			if canRetryOnAlternateAccount(ctx, policy, &assistantturn.OutputError{Status: http.StatusTooManyRequests}, opts.RetryEnabled, &accountSwitchAttempted) {
 				switched, switchErr := startPayloadCompletionOnAlternateAccount(ctx, ds, a, payload, opts, maxAttempts)
 				if switchErr != nil {
 					if hooks.OnRetryFailure != nil {
@@ -133,7 +138,7 @@ func ExecuteStreamWithRetry(ctx context.Context, ds DeepSeekCaller, a *auth.Requ
 			}
 			if captchaBody := tryDetectCaptchaFromBody(body); captchaBody != "" {
 				config.Logger.Warn("[completion_runtime_empty_retry] captcha challenge detected, mapping to 429 for account switch", "surface", surface, "stream", opts.Stream, "account", a.AccountID, "detail", captchaBody)
-				if canRetryOnAlternateAccount(ctx, a, &assistantturn.OutputError{Status: http.StatusTooManyRequests}, opts.RetryEnabled, &accountSwitchAttempted) {
+				if canRetryOnAlternateAccount(ctx, policy, &assistantturn.OutputError{Status: http.StatusTooManyRequests}, opts.RetryEnabled, &accountSwitchAttempted) {
 					switched, switchErr := startPayloadCompletionOnAlternateAccount(ctx, ds, a, payload, opts, maxAttempts)
 					if switchErr != nil {
 						if hooks.OnRetryFailure != nil {
