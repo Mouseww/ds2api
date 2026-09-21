@@ -23,6 +23,11 @@ const (
 	DefaultLimit     = 20
 	MaxLimit         = 50
 	defaultPreviewAt = 160
+
+	// progressFlushInterval coalesces streaming progress persistence: the first
+	// pending progress update arms a timer and every further update inside the
+	// window rides along with that single flush.
+	progressFlushInterval = 250 * time.Millisecond
 )
 
 var allowedLimits = map[int]struct{}{
@@ -138,7 +143,13 @@ type Store struct {
 	details   map[string]Entry
 	dirty     map[string]struct{}
 	deleted   map[string]struct{}
-	err       error
+	// indexDirty records that the on-disk index no longer matches state.Items.
+	// Streaming progress updates keep the in-memory summary in sync but leave
+	// this flag untouched, so they never rewrite (or fsync) the index file.
+	indexDirty bool
+	// flushTimer coalesces deferred progress detail writes.
+	flushTimer *time.Timer
+	err        error
 }
 
 func New(path string) *Store {
@@ -284,8 +295,10 @@ func (s *Store) Start(params StartParams) (Entry, error) {
 	}
 	s.details[entry.ID] = entry
 	s.markDetailDirtyLocked(entry.ID)
-	s.rebuildIndexLocked()
-	if err := s.saveLocked(); err != nil {
+	s.upsertIndexLocked(entry.ID)
+	// A new entry changes the collection, so the index must be rewritten.
+	s.indexDirty = true
+	if err := s.persistLocked(); err != nil {
 		return cloneEntry(entry), err
 	}
 	return cloneEntry(entry), nil
@@ -332,8 +345,16 @@ func (s *Store) Update(id string, params UpdateParams) (Entry, error) {
 	}
 	s.details[target] = item
 	s.markDetailDirtyLocked(target)
-	s.rebuildIndexLocked()
-	if err := s.saveLocked(); err != nil {
+	// The in-memory summary always tracks the detail, but only terminal updates
+	// rewrite the index file. Streaming progress is coalesced into a deferred
+	// detail-only flush so the index is neither rewritten nor fsynced.
+	s.upsertIndexLocked(target)
+	if !isTerminalUpdate(params) {
+		s.scheduleProgressFlushLocked()
+		return cloneEntry(item), nil
+	}
+	s.indexDirty = true
+	if err := s.persistLocked(); err != nil {
 		return Entry{}, err
 	}
 	return cloneEntry(item), nil
@@ -357,9 +378,10 @@ func (s *Store) Delete(id string) error {
 	}
 	s.markDetailDeletedLocked(target)
 	delete(s.details, target)
+	s.removeIndexEntryLocked(target)
 	s.nextRevisionLocked()
-	s.rebuildIndexLocked()
-	if err := s.saveLocked(); err != nil {
+	s.indexDirty = true
+	if err := s.persistLocked(); err != nil {
 		return err
 	}
 	return nil
@@ -378,9 +400,10 @@ func (s *Store) Clear() error {
 		s.markDetailDeletedLocked(id)
 	}
 	s.details = map[string]Entry{}
+	s.state.Items = []SummaryEntry{}
 	s.nextRevisionLocked()
-	s.rebuildIndexLocked()
-	if err := s.saveLocked(); err != nil {
+	s.indexDirty = true
+	if err := s.persistLocked(); err != nil {
 		return err
 	}
 	return nil
@@ -400,8 +423,9 @@ func (s *Store) SetLimit(limit int) (File, error) {
 	}
 	s.state.Limit = limit
 	s.nextRevisionLocked()
-	s.rebuildIndexLocked()
-	if err := s.saveLocked(); err != nil {
+	s.trimIndexLocked()
+	s.indexDirty = true
+	if err := s.persistLocked(); err != nil {
 		return File{}, err
 	}
 	return cloneFile(s.state), nil
@@ -421,7 +445,8 @@ func (s *Store) loadLocked() error {
 	raw, err := os.ReadFile(s.path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			if saveErr := s.saveLocked(); saveErr != nil {
+			s.indexDirty = true
+			if saveErr := s.persistLocked(); saveErr != nil {
 				config.Logger.Warn("[chat_history] bootstrap write failed", "path", s.path, "error", saveErr)
 			}
 			return nil
@@ -435,7 +460,8 @@ func (s *Store) loadLocked() error {
 	}
 	if legacyOK {
 		s.loadLegacyLocked(legacy)
-		if err := s.saveLocked(); err != nil {
+		s.indexDirty = true
+		if err := s.persistLocked(); err != nil {
 			config.Logger.Warn("[chat_history] legacy migration writeback failed", "path", s.path, "error", err)
 		}
 		return nil
@@ -461,7 +487,8 @@ func (s *Store) loadLocked() error {
 		s.details[item.ID] = detail
 	}
 	s.rebuildIndexLocked()
-	if saveErr := s.saveLocked(); saveErr != nil {
+	s.indexDirty = true
+	if saveErr := s.persistLocked(); saveErr != nil {
 		config.Logger.Warn("[chat_history] index rewrite failed", "path", s.path, "error", saveErr)
 	}
 	return nil
@@ -499,12 +526,12 @@ func (s *Store) loadLegacyLocked(legacy legacyFile) {
 	s.rebuildIndexLocked()
 }
 
-func (s *Store) saveLocked() error {
+// persistLocked is the single write path for the store. It always flushes the
+// pending detail files and only rewrites the index when indexDirty is set, so
+// streaming progress updates never rewrite (or fsync) the index file.
+func (s *Store) persistLocked() error {
 	s.state.Version = FileVersion
-	if !isAllowedLimit(s.state.Limit) {
-		s.state.Limit = DefaultLimit
-	}
-	s.rebuildIndexLocked()
+	s.normalizeLimitLocked()
 
 	if err := os.MkdirAll(s.detailDir, 0o755); err != nil {
 		return fmt.Errorf("create chat history detail dir: %w", err)
@@ -533,52 +560,181 @@ func (s *Store) saveLocked() error {
 		}
 	}
 
-	payload, err := json.MarshalIndent(s.state, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode chat history index: %w", err)
-	}
-	if err := writeFileAtomic(s.path, append(payload, '\n')); err != nil {
-		return err
+	if s.indexDirty {
+		payload, err := json.MarshalIndent(s.state, "", "  ")
+		if err != nil {
+			return fmt.Errorf("encode chat history index: %w", err)
+		}
+		if err := writeFileAtomic(s.path, append(payload, '\n')); err != nil {
+			return err
+		}
 	}
 	s.clearPendingDetailChangesLocked()
+	s.indexDirty = false
 	return nil
 }
 
+// Flush persists every pending detail and index change synchronously.
+func (s *Store) Flush() error {
+	if s == nil {
+		return errors.New("chat history store is nil")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return s.err
+	}
+	s.stopFlushTimerLocked()
+	return s.persistLocked()
+}
+
+// Close flushes pending writes and stops the deferred progress flusher so a
+// terminal entry is guaranteed to be on disk.
+func (s *Store) Close() error {
+	if s == nil {
+		return errors.New("chat history store is nil")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stopFlushTimerLocked()
+	if s.err != nil {
+		return s.err
+	}
+	return s.persistLocked()
+}
+
+// scheduleProgressFlushLocked arms the deferred flush timer for streaming
+// progress; further progress updates inside the window ride along with it.
+func (s *Store) scheduleProgressFlushLocked() {
+	if s.flushTimer != nil {
+		return
+	}
+	s.flushTimer = time.AfterFunc(progressFlushInterval, s.flushProgress)
+}
+
+// flushProgress writes coalesced progress details. It never touches the index
+// unless a previous synchronous write failed and left indexDirty set.
+func (s *Store) flushProgress() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.flushTimer = nil
+	if err := s.persistLocked(); err != nil {
+		config.Logger.Warn("[chat_history] deferred progress flush failed", "path", s.path, "error", err)
+	}
+}
+
+func (s *Store) stopFlushTimerLocked() {
+	if s.flushTimer == nil {
+		return
+	}
+	s.flushTimer.Stop()
+	s.flushTimer = nil
+}
+
 func (s *Store) rebuildIndexLocked() {
+	s.normalizeLimitLocked()
 	summaries := make([]SummaryEntry, 0, len(s.details))
 	for _, item := range s.details {
 		summaries = append(summaries, summaryFromEntry(item))
 	}
-	sort.Slice(summaries, func(i, j int) bool {
-		if summaries[i].CreatedAt == summaries[j].CreatedAt {
-			if summaries[i].Revision == summaries[j].Revision {
-				return summaries[i].UpdatedAt > summaries[j].UpdatedAt
-			}
-			return summaries[i].Revision > summaries[j].Revision
-		}
-		return summaries[i].CreatedAt > summaries[j].CreatedAt
+	sortSummaries(summaries)
+	s.state.Items = s.evictOverflowLocked(summaries)
+}
+
+func sortSummaries(items []SummaryEntry) {
+	sort.Slice(items, func(i, j int) bool {
+		return summaryLess(items[i], items[j])
 	})
+}
+
+func summaryLess(a, b SummaryEntry) bool {
+	if a.CreatedAt == b.CreatedAt {
+		if a.Revision == b.Revision {
+			return a.UpdatedAt > b.UpdatedAt
+		}
+		return a.Revision > b.Revision
+	}
+	return a.CreatedAt > b.CreatedAt
+}
+
+// upsertIndexLocked refreshes a single summary in place instead of rebuilding
+// and re-sorting the whole index on every update.
+func (s *Store) upsertIndexLocked(id string) {
+	item, ok := s.details[id]
+	if !ok {
+		return
+	}
+	s.removeIndexEntryLocked(id)
+	summary := summaryFromEntry(item)
+	items := s.state.Items
+	pos := sort.Search(len(items), func(i int) bool {
+		return !summaryLess(items[i], summary)
+	})
+	items = append(items, SummaryEntry{})
+	copy(items[pos+1:], items[pos:])
+	items[pos] = summary
+	s.state.Items = s.evictOverflowLocked(items)
+}
+
+func (s *Store) removeIndexEntryLocked(id string) {
+	for i := range s.state.Items {
+		if s.state.Items[i].ID != id {
+			continue
+		}
+		s.state.Items = append(s.state.Items[:i], s.state.Items[i+1:]...)
+		return
+	}
+}
+
+func (s *Store) trimIndexLocked() {
+	s.normalizeLimitLocked()
+	s.state.Items = s.evictOverflowLocked(s.state.Items)
+}
+
+func (s *Store) normalizeLimitLocked() {
 	if s.state.Limit < DisabledLimit || !isAllowedLimit(s.state.Limit) {
 		s.state.Limit = DefaultLimit
 	}
-	if s.state.Limit == DisabledLimit {
-		s.state.Items = summaries
-		return
+}
+
+// evictOverflowLocked drops the lowest-priority summaries once the item count
+// exceeds the configured limit, preserving the previous retention semantics.
+func (s *Store) evictOverflowLocked(items []SummaryEntry) []SummaryEntry {
+	if s.state.Limit == DisabledLimit || len(items) <= s.state.Limit {
+		return items
 	}
-	if len(summaries) > s.state.Limit {
-		keep := make(map[string]struct{}, s.state.Limit)
-		for _, item := range summaries[:s.state.Limit] {
-			keep[item.ID] = struct{}{}
-		}
-		for id := range s.details {
-			if _, ok := keep[id]; !ok {
-				s.markDetailDeletedLocked(id)
-				delete(s.details, id)
-			}
-		}
-		summaries = summaries[:s.state.Limit]
+	keep := make(map[string]struct{}, s.state.Limit)
+	for _, item := range items[:s.state.Limit] {
+		keep[item.ID] = struct{}{}
 	}
-	s.state.Items = summaries
+	for id := range s.details {
+		if _, ok := keep[id]; !ok {
+			s.markDetailDeletedLocked(id)
+			delete(s.details, id)
+		}
+	}
+	// Retention dropped entries, so the on-disk index no longer matches and
+	// must be rewritten (a stale entry would break loading its deleted detail).
+	s.indexDirty = true
+	return items[:s.state.Limit]
+}
+
+// isTerminalUpdate reports whether an update ends the entry. Terminal updates
+// are written synchronously, index included; everything else is streaming
+// progress and only refreshes its own detail file.
+func isTerminalUpdate(params UpdateParams) bool {
+	if params.Completed {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(params.Status)) {
+	case "success", "error", "stopped":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Store) nextRevisionLocked() int64 {

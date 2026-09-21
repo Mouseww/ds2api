@@ -3,6 +3,7 @@ package chathistory
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -631,5 +632,291 @@ func TestUpdateAllowsOverwritingContentWithNewValue(t *testing.T) {
 	}
 	if updated.Content != "final answer" {
 		t.Fatalf("expected content to be overwritten, got %q", updated.Content)
+	}
+}
+
+func readIndexFile(t *testing.T, path string) (File, []byte) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read index failed: %v", err)
+	}
+	var persisted File
+	if err := json.Unmarshal(raw, &persisted); err != nil {
+		t.Fatalf("persisted index is invalid json: %v", err)
+	}
+	return persisted, raw
+}
+
+// TestStreamingProgressUpdateDoesNotRewriteIndex pins the core of the
+// persistence layering: a streaming progress update flushes its own detail but
+// neither rewrites nor touches the index file.
+func TestStreamingProgressUpdateDoesNotRewriteIndex(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "chat_history.json")
+	store := New(path)
+
+	started, err := store.Start(StartParams{UserInput: "hello"})
+	if err != nil {
+		t.Fatalf("start failed: %v", err)
+	}
+	_, beforeIndex := readIndexFile(t, path)
+	beforeStat, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat index failed: %v", err)
+	}
+
+	if _, err := store.Update(started.ID, UpdateParams{
+		Status:           "streaming",
+		ReasoningContent: "thinking",
+		Content:          "partial",
+		StatusCode:       200,
+		ElapsedMs:        120,
+	}); err != nil {
+		t.Fatalf("progress update failed: %v", err)
+	}
+	if err := store.Flush(); err != nil {
+		t.Fatalf("flush failed: %v", err)
+	}
+
+	_, afterIndex := readIndexFile(t, path)
+	afterStat, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat index after progress failed: %v", err)
+	}
+	if !bytes.Equal(beforeIndex, afterIndex) {
+		t.Fatalf("streaming progress rewrote the index file\nbefore=%s\nafter=%s", beforeIndex, afterIndex)
+	}
+	if !afterStat.ModTime().Equal(beforeStat.ModTime()) {
+		t.Fatalf("streaming progress touched the index file")
+	}
+
+	detail, err := os.ReadFile(filepath.Join(store.DetailDir(), started.ID+".json"))
+	if err != nil {
+		t.Fatalf("read progress detail failed: %v", err)
+	}
+	if !strings.Contains(string(detail), "partial") {
+		t.Fatalf("expected progress detail to be persisted, got %s", detail)
+	}
+
+	snapshot, err := store.Snapshot()
+	if err != nil {
+		t.Fatalf("snapshot failed: %v", err)
+	}
+	if len(snapshot.Items) != 1 || snapshot.Items[0].Preview != "partial" {
+		t.Fatalf("expected in-memory summary to track the progress detail, got %#v", snapshot.Items)
+	}
+	if snapshot.Items[0].Status != "streaming" {
+		t.Fatalf("expected streaming summary, got %#v", snapshot.Items[0])
+	}
+}
+
+// TestStreamingProgressDebounceFlushesDetailWithoutIndex covers the deferred
+// coalescing path: no synchronous flush is used, the detail still lands after
+// the debounce window, and the index stays untouched.
+func TestStreamingProgressDebounceFlushesDetailWithoutIndex(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "chat_history.json")
+	store := New(path)
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Fatalf("close store failed: %v", err)
+		}
+	})
+
+	started, err := store.Start(StartParams{UserInput: "hello"})
+	if err != nil {
+		t.Fatalf("start failed: %v", err)
+	}
+	_, beforeIndex := readIndexFile(t, path)
+
+	if _, err := store.Update(started.ID, UpdateParams{Status: "streaming", Content: "partial"}); err != nil {
+		t.Fatalf("progress update failed: %v", err)
+	}
+
+	detailPath := filepath.Join(store.DetailDir(), started.ID+".json")
+	deadline := time.Now().Add(5 * progressFlushInterval)
+	var detail []byte
+	for time.Now().Before(deadline) {
+		raw, readErr := os.ReadFile(detailPath)
+		if readErr == nil && strings.Contains(string(raw), "partial") {
+			detail = raw
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(detail) == 0 || !strings.Contains(string(detail), "partial") {
+		t.Fatalf("expected debounced progress flush to persist the detail, got %s", detail)
+	}
+
+	_, afterIndex := readIndexFile(t, path)
+	if !bytes.Equal(beforeIndex, afterIndex) {
+		t.Fatalf("debounced progress flush rewrote the index file\nbefore=%s\nafter=%s", beforeIndex, afterIndex)
+	}
+}
+
+// TestTerminalUpdateWritesIndexAndSurvivesReload proves the terminal path still
+// writes both files and that a fresh Store reads the terminal data back.
+func TestTerminalUpdateWritesIndexAndSurvivesReload(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "chat_history.json")
+	store := New(path)
+
+	started, err := store.Start(StartParams{
+		CallerID:  "caller:test",
+		Model:     "deepseek-v4-flash",
+		Stream:    true,
+		UserInput: "hello",
+	})
+	if err != nil {
+		t.Fatalf("start failed: %v", err)
+	}
+	if _, err := store.Update(started.ID, UpdateParams{Status: "streaming", Content: "partial"}); err != nil {
+		t.Fatalf("progress update failed: %v", err)
+	}
+	if _, err := store.Update(started.ID, UpdateParams{
+		Status:       "success",
+		Content:      "final answer",
+		StatusCode:   200,
+		FinishReason: "stop",
+		Usage:        map[string]any{"total_tokens": 3},
+		Completed:    true,
+	}); err != nil {
+		t.Fatalf("terminal update failed: %v", err)
+	}
+
+	persisted, _ := readIndexFile(t, path)
+	if len(persisted.Items) != 1 {
+		t.Fatalf("expected terminal update to persist one summary, got %#v", persisted.Items)
+	}
+	if persisted.Items[0].Status != "success" || persisted.Items[0].Preview != "final answer" {
+		t.Fatalf("expected terminal summary on disk, got %#v", persisted.Items[0])
+	}
+	if persisted.Items[0].CompletedAt == 0 {
+		t.Fatalf("expected completed_at on the persisted summary, got %#v", persisted.Items[0])
+	}
+
+	reloaded := New(path)
+	reloadedSnapshot, err := reloaded.Snapshot()
+	if err != nil {
+		t.Fatalf("reload snapshot failed: %v", err)
+	}
+	if len(reloadedSnapshot.Items) != 1 || reloadedSnapshot.Items[0].Status != "success" {
+		t.Fatalf("expected reloaded terminal summary, got %#v", reloadedSnapshot.Items)
+	}
+	full, err := reloaded.Get(started.ID)
+	if err != nil {
+		t.Fatalf("reload detail failed: %v", err)
+	}
+	if full.Status != "success" || full.Content != "final answer" || full.CompletedAt == 0 {
+		t.Fatalf("expected reloaded terminal detail, got %#v", full)
+	}
+}
+
+// TestErrorAndStoppedUpdatesRewriteIndex keeps the other terminal statuses on
+// the synchronous index-writing path.
+func TestErrorAndStoppedUpdatesRewriteIndex(t *testing.T) {
+	for _, status := range []string{"error", "stopped"} {
+		t.Run(status, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "chat_history.json")
+			store := New(path)
+			started, err := store.Start(StartParams{UserInput: "hello"})
+			if err != nil {
+				t.Fatalf("start failed: %v", err)
+			}
+			if _, err := store.Update(started.ID, UpdateParams{
+				Status:  status,
+				Content: "body",
+			}); err != nil {
+				t.Fatalf("%s update failed: %v", status, err)
+			}
+			persisted, _ := readIndexFile(t, path)
+			if len(persisted.Items) != 1 || persisted.Items[0].Status != status {
+				t.Fatalf("expected %s summary persisted, got %#v", status, persisted.Items)
+			}
+		})
+	}
+}
+
+// TestCloseFlushesPendingProgress proves terminal safety: Close must land the
+// deferred progress detail without waiting for the debounce timer.
+func TestCloseFlushesPendingProgress(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "chat_history.json")
+	store := New(path)
+
+	started, err := store.Start(StartParams{UserInput: "hello"})
+	if err != nil {
+		t.Fatalf("start failed: %v", err)
+	}
+	if _, err := store.Update(started.ID, UpdateParams{Status: "streaming", Content: "partial"}); err != nil {
+		t.Fatalf("progress update failed: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close store failed: %v", err)
+	}
+
+	detail, err := os.ReadFile(filepath.Join(store.DetailDir(), started.ID+".json"))
+	if err != nil {
+		t.Fatalf("read detail after close failed: %v", err)
+	}
+	if !strings.Contains(string(detail), "partial") {
+		t.Fatalf("expected Close to flush the pending progress detail, got %s", detail)
+	}
+
+	reloaded := New(path)
+	full, err := reloaded.Get(started.ID)
+	if err != nil {
+		t.Fatalf("reload detail failed: %v", err)
+	}
+	if full.Content != "partial" {
+		t.Fatalf("expected flushed progress content after reload, got %#v", full)
+	}
+}
+
+// TestOverflowEvictionUpdatesIndexAndDetailFiles checks that retention keeps the
+// index and the detail directory on disk consistent.
+func TestOverflowEvictionUpdatesIndexAndDetailFiles(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "chat_history.json")
+	store := New(path)
+	if _, err := store.SetLimit(10); err != nil {
+		t.Fatalf("set limit failed: %v", err)
+	}
+
+	ids := make([]string, 0, 12)
+	for i := 0; i < 12; i++ {
+		entry, err := store.Start(StartParams{UserInput: fmt.Sprintf("msg-%d", i)})
+		if err != nil {
+			t.Fatalf("start %d failed: %v", i, err)
+		}
+		ids = append(ids, entry.ID)
+	}
+
+	persisted, _ := readIndexFile(t, path)
+	if len(persisted.Items) != 10 {
+		t.Fatalf("expected 10 persisted summaries, got %d", len(persisted.Items))
+	}
+	if persisted.Items[0].ID != ids[len(ids)-1] {
+		t.Fatalf("expected newest entry first, got %#v", persisted.Items[0])
+	}
+	for _, id := range ids[:2] {
+		if _, err := store.Get(id); err == nil {
+			t.Fatalf("expected evicted entry %s to be gone from memory", id)
+		}
+		if _, err := os.Stat(filepath.Join(store.DetailDir(), id+".json")); err == nil {
+			t.Fatalf("expected evicted detail file for %s to be removed", id)
+		}
+	}
+	detailFiles, err := os.ReadDir(store.DetailDir())
+	if err != nil {
+		t.Fatalf("read detail dir failed: %v", err)
+	}
+	if len(detailFiles) != 10 {
+		t.Fatalf("expected 10 detail files after eviction, got %d", len(detailFiles))
+	}
+
+	reloaded := New(path)
+	reloadedSnapshot, err := reloaded.Snapshot()
+	if err != nil {
+		t.Fatalf("reload snapshot failed: %v", err)
+	}
+	if len(reloadedSnapshot.Items) != 10 {
+		t.Fatalf("expected reloaded index to stay consistent, got %d", len(reloadedSnapshot.Items))
 	}
 }
