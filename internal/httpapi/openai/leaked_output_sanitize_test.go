@@ -29,6 +29,38 @@ func TestSanitizeLeakedOutputRemovesStandaloneMetaMarkers(t *testing.T) {
 	}
 }
 
+func TestSanitizeLeakedOutputRemovesRoleMarkers(t *testing.T) {
+	// The model echoes ds2api's own prompt role markers back into visible
+	// output. The marker itself must be stripped while the trailing content
+	// is preserved.
+	raw := "<Tool>:=== 两份文档是否存在 ===\n" +
+		"-rw-r--r-- 1 webber 197121 8833 QUESTION_TOOL_FRONTEND_CHANGES.md\n" +
+		"<System>:system rule\n<User>:question\n<Assistant>:answer\n<Tool>:tool result"
+	got := sanitizeLeakedOutput(raw)
+	for _, marker := range []string{"<System>:", "<User>:", "<Assistant>:", "<Tool>:"} {
+		if strings.Contains(got, marker) {
+			t.Fatalf("role marker %q leaked: %q", marker, got)
+		}
+	}
+	if !strings.Contains(got, "两份文档是否存在") || !strings.Contains(got, "QUESTION_TOOL_FRONTEND_CHANGES.md") {
+		t.Fatalf("expected marker content to be preserved, got %q", got)
+	}
+	if !strings.Contains(got, "system rule") || !strings.Contains(got, "tool result") {
+		t.Fatalf("expected role content to be preserved, got %q", got)
+	}
+}
+
+func TestSanitizeLeakedOutputRemovesReasoningMarkers(t *testing.T) {
+	raw := "prefix [reasoning_content]\ninternal reasoning\n[/reasoning_content] suffix"
+	got := sanitizeLeakedOutput(raw)
+	if strings.Contains(got, "reasoning_content") {
+		t.Fatalf("reasoning marker leaked: %q", got)
+	}
+	if !strings.Contains(got, "prefix") || !strings.Contains(got, "suffix") || !strings.Contains(got, "internal reasoning") {
+		t.Fatalf("expected reasoning-adjacent content to be preserved, got %q", got)
+	}
+}
+
 func TestSanitizeLeakedOutputRemovesFullwidthDelimitedMetaMarkers(t *testing.T) {
 	fw := "\uff5c"
 	raw := "A<" + fw + "end▁of▁sentence" + fw + ">B<" + fw + " Assistant " + fw + ">C<" + fw + "end_of_toolresults" + fw + ">D"

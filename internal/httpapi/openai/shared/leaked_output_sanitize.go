@@ -31,6 +31,19 @@ var leakedThoughtMarkerPattern = regexp.MustCompile(`(?i)<[\|\x{ff5c}]\s*(?:begi
 //   - U+2581 variant:   <|end▁of▁sentence|>, <|end▁of▁toolresults|>, <|end▁of▁instructions|>
 var leakedMetaMarkerPattern = regexp.MustCompile(`(?i)<[\|\x{ff5c}]\s*(?:assistant|tool|end[_▁]of[_▁]sentence|end[_▁]of[_▁]thinking|end[_▁]of[_▁]thought|end[_▁]of[_▁]toolresults|end[_▁]of[_▁]instructions)\s*[\|\x{ff5c}]>`)
 
+// leakedRoleMarkerPattern matches ds2api's own prompt role markers
+// (<System>:, <User>:, <Assistant>:, <Tool>:) that the model echoes back in
+// its visible output. The prompt layer injects these to delimit role blocks
+// (internal/prompt/messages.go); they must never surface as API content.
+var leakedRoleMarkerPattern = regexp.MustCompile(`(?i)<(?:System|User|Assistant|Tool)>:\s*`)
+
+// leakedReasoningMarkerPattern matches the reasoning history brackets that the
+// prompt layer uses to wrap assistant reasoning ([reasoning_content] ...
+// [/reasoning_content]). The real reasoning content is carried in the
+// reasoning/thinking channel, so these brackets in visible text are leaked
+// prompt markup.
+var leakedReasoningMarkerPattern = regexp.MustCompile(`\[/?reasoning_content\]`)
+
 // leakedAgentXMLBlockPatterns catch agent-style XML blocks that leak through
 // when the sieve fails to capture them. These are applied only to complete
 // wrapper blocks so standalone "<result>" examples in normal output remain
@@ -58,6 +71,8 @@ func sanitizeLeakedOutput(text string) string {
 	out = leakedBOSMarkerPattern.ReplaceAllString(out, "")
 	out = leakedThoughtMarkerPattern.ReplaceAllString(out, "")
 	out = leakedMetaMarkerPattern.ReplaceAllString(out, "")
+	out = leakedRoleMarkerPattern.ReplaceAllString(out, "")
+	out = leakedReasoningMarkerPattern.ReplaceAllString(out, "")
 	out = stripLeakedToolCallWrapperBlocks(out)
 	out = sanitizeLeakedAgentXMLBlocks(out)
 	return out
