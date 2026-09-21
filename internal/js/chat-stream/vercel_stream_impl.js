@@ -32,6 +32,7 @@ const {
 const {
   trimContinuationOverlap,
 } = require('./dedupe');
+const { createVisibleTextCleaner } = require('./visible_clean');
 
 const DEEPSEEK_COMPLETION_URL = 'https://chat.deepseek.com/api/v0/chat/completion';
 const DEEPSEEK_CONTINUE_URL = 'https://chat.deepseek.com/api/v0/chat/continue';
@@ -175,6 +176,11 @@ async function handleVercelStream(req, res, rawBody, payload) {
     let currentType = thinkingEnabled ? 'thinking' : 'text';
     let thinkingText = '';
     let outputText = '';
+    // Visible output is the sanitized text: echoed role blocks / reasoning
+    // history / think blocks never count as an answer (empty-output retry and
+    // usage are decided on it). outputText stays raw for tool detection.
+    let visibleOutputText = '';
+    const visibleCleaner = createVisibleTextCleaner();
     let usagePrompt = finalPrompt;
     const toolSieveEnabled = toolPolicy.toolSieveEnabled;
     const toolSieveState = createToolSieveState();
@@ -229,12 +235,12 @@ async function handleVercelStream(req, res, rawBody, payload) {
       if (detected.length > 0 || toolCallsEmitted) {
         reason = 'tool_calls';
       }
-      if (detected.length === 0 && !toolCallsEmitted && outputText.trim() === '') {
+      if (detected.length === 0 && !toolCallsEmitted && visibleOutputText.trim() === '') {
         if (options.deferEmpty && reason !== 'content_filter') {
           return false;
         }
         ended = true;
-        const detail = upstreamEmptyOutputDetail(reason === 'content_filter', outputText, thinkingText);
+        const detail = upstreamEmptyOutputDetail(reason === 'content_filter', visibleOutputText, thinkingText);
         sendFailedChunk(res, detail.status, detail.message, detail.code);
         await releaseLease();
         if (!res.writableEnded && !res.destroyed) {
@@ -249,7 +255,7 @@ async function handleVercelStream(req, res, rawBody, payload) {
         created,
         model,
         choices: [{ delta: {}, index: 0, finish_reason: reason }],
-        usage: buildUsage(usagePrompt, thinkingText, outputText),
+        usage: buildUsage(usagePrompt, thinkingText, visibleOutputText),
       });
       if (!res.writableEnded && !res.destroyed) {
         res.write('data: [DONE]\n\n');
@@ -314,7 +320,7 @@ async function handleVercelStream(req, res, rawBody, payload) {
                 return { terminal: await finish('content_filter'), retryable: false };
               }
               if (parsed.contentFilter) {
-                return { terminal: await finish(outputText.trim() === '' ? 'content_filter' : 'stop'), retryable: false };
+                return { terminal: await finish(visibleOutputText.trim() === '' ? 'content_filter' : 'stop'), retryable: false };
               }
               if (parsed.finished) {
                 streamEnded = true;
@@ -343,11 +349,22 @@ async function handleVercelStream(req, res, rawBody, payload) {
                     continue;
                   }
                   outputText += trimmed;
-                  if (!toolSieveEnabled) {
-                    deltaCoalescer.append('content', trimmed);
+                  // Sanitize the display path: echoed role blocks, reasoning
+                  // history and think blocks must never reach the client.
+                  // outputText stays raw so tool detection at finish still
+                  // sees tool calls that were wrapped inside an echo.
+                  const visible = visibleCleaner.clean(trimmed);
+                  if (visible) {
+                    visibleOutputText += visible;
+                  }
+                  if (!visible) {
                     continue;
                   }
-                  const events = processToolSieveChunk(toolSieveState, trimmed, toolNames);
+                  if (!toolSieveEnabled) {
+                    deltaCoalescer.append('content', visible);
+                    continue;
+                  }
+                  const events = processToolSieveChunk(toolSieveState, visible, toolNames);
                   for (const evt of events) {
                     if (evt.type === 'tool_call_deltas') {
                       if (!emitEarlyToolDeltas) {

@@ -31,8 +31,10 @@ func TestSanitizeLeakedOutputRemovesStandaloneMetaMarkers(t *testing.T) {
 
 func TestSanitizeLeakedOutputRemovesRoleMarkers(t *testing.T) {
 	// The model echoes ds2api's own prompt role markers back into visible
-	// output. The marker itself must be stripped while the trailing content
-	// is preserved.
+	// output. Markers never surface, and content following a <User>/<System>/
+	// <Tool> marker is leaked prompt context (another role's payload), so it
+	// is suppressed until the next role marker. Only content after an
+	// <Assistant>: marker is the model's own answer and is preserved.
 	raw := "<Tool>:=== 两份文档是否存在 ===\n" +
 		"-rw-r--r-- 1 webber 197121 8833 QUESTION_TOOL_FRONTEND_CHANGES.md\n" +
 		"<System>:system rule\n<User>:question\n<Assistant>:answer\n<Tool>:tool result"
@@ -42,22 +44,31 @@ func TestSanitizeLeakedOutputRemovesRoleMarkers(t *testing.T) {
 			t.Fatalf("role marker %q leaked: %q", marker, got)
 		}
 	}
-	if !strings.Contains(got, "两份文档是否存在") || !strings.Contains(got, "QUESTION_TOOL_FRONTEND_CHANGES.md") {
-		t.Fatalf("expected marker content to be preserved, got %q", got)
+	if strings.Contains(got, "两份文档是否存在") || strings.Contains(got, "QUESTION_TOOL_FRONTEND_CHANGES.md") {
+		t.Fatalf("expected echoed tool-result content suppressed, got %q", got)
 	}
-	if !strings.Contains(got, "system rule") || !strings.Contains(got, "tool result") {
-		t.Fatalf("expected role content to be preserved, got %q", got)
+	if strings.Contains(got, "system rule") || strings.Contains(got, "question") || strings.Contains(got, "tool result") {
+		t.Fatalf("expected echoed role content suppressed, got %q", got)
+	}
+	if !strings.Contains(got, "answer") {
+		t.Fatalf("expected content after <Assistant>: marker preserved, got %q", got)
 	}
 }
 
 func TestSanitizeLeakedOutputRemovesReasoningMarkers(t *testing.T) {
+	// A complete echoed [reasoning_content]...[/reasoning_content] block is
+	// leaked thinking history: the whole block is removed, not just the
+	// brackets, so the model's old deliberation never surfaces as an answer.
 	raw := "prefix [reasoning_content]\ninternal reasoning\n[/reasoning_content] suffix"
 	got := sanitizeLeakedOutput(raw)
 	if strings.Contains(got, "reasoning_content") {
 		t.Fatalf("reasoning marker leaked: %q", got)
 	}
-	if !strings.Contains(got, "prefix") || !strings.Contains(got, "suffix") || !strings.Contains(got, "internal reasoning") {
-		t.Fatalf("expected reasoning-adjacent content to be preserved, got %q", got)
+	if strings.Contains(got, "internal reasoning") {
+		t.Fatalf("expected echoed reasoning content removed, got %q", got)
+	}
+	if !strings.Contains(got, "prefix") || !strings.Contains(got, "suffix") {
+		t.Fatalf("expected reasoning-adjacent content preserved, got %q", got)
 	}
 }
 
@@ -71,9 +82,11 @@ func TestSanitizeLeakedOutputRemovesFullwidthDelimitedMetaMarkers(t *testing.T) 
 }
 
 func TestSanitizeLeakedOutputRemovesThinkAndBosMarkers(t *testing.T) {
+	// A complete echoed think block is mis-channeled thinking: the block is
+	// removed with its content. Stray BOS markers are stripped individually.
 	raw := "A<think>B</think>C<|begin▁of▁sentence|>D<| begin_of_sentence |>E<|begin_of_sentence|>F"
 	got := sanitizeLeakedOutput(raw)
-	if got != "ABCDEF" {
+	if got != "ACDEF" {
 		t.Fatalf("unexpected sanitize result for think/BOS markers: %q", got)
 	}
 }
@@ -116,7 +129,8 @@ func TestSanitizeLeakedOutputStripsOrphanedDSMLToolCallMarkup(t *testing.T) {
 	// tool-name tag, orphaned parameter tags and dangling CDATA markers. None
 	// of it forms a complete <tool_calls> block, so the sieve passes it through
 	// as text and this sanitizer is the last line of defense against the markup
-	// becoming visible to the user.
+	// becoming visible to the user. The <Tool>: marker opens a leaked role
+	// block, so the echoed command text is suppressed along with the markup.
 	raw := "</|DSML|tool_calls><Tool>:echo hi\n" +
 		"']]></|DSML|parameter>\n" +
 		"<|DSML|parameter name=\"description\"><![CDATA[拉取服务器证据]]></|DSML|parameter>\n" +
@@ -131,8 +145,8 @@ func TestSanitizeLeakedOutputStripsOrphanedDSMLToolCallMarkup(t *testing.T) {
 	if strings.Contains(got, "CDATA") || strings.Contains(got, "]]>") {
 		t.Fatalf("CDATA markers leaked: %q", got)
 	}
-	if !strings.Contains(got, "echo hi") {
-		t.Fatalf("expected command text to be preserved, got %q", got)
+	if strings.TrimSpace(got) != "" {
+		t.Fatalf("expected echoed tool markup fully suppressed, got %q", got)
 	}
 }
 

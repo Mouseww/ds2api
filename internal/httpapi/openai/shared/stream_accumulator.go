@@ -16,6 +16,11 @@ type StreamAccumulator struct {
 	ToolDetectionThinking strings.Builder
 	RawText               strings.Builder
 	Text                  strings.Builder
+
+	// roleBlockSuppressed carries leaked-role-block suppression across text
+	// parts: once an echoed <User>/<System>/<Tool> marker opens a block, the
+	// following parts stay invisible until the next role marker arrives.
+	roleBlockSuppressed bool
 }
 
 type StreamPartDelta struct {
@@ -93,7 +98,15 @@ func (a *StreamAccumulator) applyTextPart(text string) StreamPartDelta {
 		delta.CitationOnly = true
 		return delta
 	}
-	cleanedText := CleanVisibleOutput(rawTrimmed, a.StripReferenceMarkers)
+	// Leaked role blocks must be suppressed across parts: run the stateful
+	// pass before the per-part sanitizer so a block opened in an earlier
+	// part keeps the following parts invisible.
+	visible, suppressed := applyRoleBlockSuppression(rawTrimmed, a.roleBlockSuppressed)
+	a.roleBlockSuppressed = suppressed
+	if visible == "" {
+		return delta
+	}
+	cleanedText := CleanVisibleOutput(visible, a.StripReferenceMarkers)
 	trimmed := sse.TrimContinuationOverlapFromBuilder(&a.Text, cleanedText)
 	if trimmed == "" {
 		return delta

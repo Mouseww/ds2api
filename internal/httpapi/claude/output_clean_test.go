@@ -28,13 +28,13 @@ func TestClaudeCleanVisibleOutputStripsLeakedMarkup(t *testing.T) {
 		}
 	})
 
-	t.Run("think tags are stripped, inner text kept (shared semantics)", func(t *testing.T) {
+	t.Run("think blocks are removed with their content (shared semantics)", func(t *testing.T) {
 		got := cleanVisibleOutput("a<think>secret</think>b", false)
-		if strings.Contains(got, "think") {
-			t.Fatalf("expected think tags stripped, got %q", got)
+		if strings.Contains(got, "think") || strings.Contains(got, "secret") {
+			t.Fatalf("expected think block removed entirely, got %q", got)
 		}
-		if !strings.Contains(got, "asecretb") {
-			t.Fatalf("expected inner text preserved per shared sanitizer, got %q", got)
+		if !strings.Contains(got, "a") || !strings.Contains(got, "b") {
+			t.Fatalf("expected surrounding text preserved, got %q", got)
 		}
 	})
 
