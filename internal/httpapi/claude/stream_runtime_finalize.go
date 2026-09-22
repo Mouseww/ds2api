@@ -9,8 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
-
-	streamengine "ds2api/internal/stream"
 )
 
 func (s *claudeStreamRuntime) closeThinkingBlock() {
@@ -137,6 +135,7 @@ func (s *claudeStreamRuntime) finalize(stopReason string, deferEmptyOutput bool)
 	})
 	if outcome.ShouldFail {
 		if deferEmptyOutput {
+			s.deferredRetryKind = assistantturn.ClassifyRetryKind(turn)
 			return false
 		}
 		s.ended = true
@@ -147,6 +146,15 @@ func (s *claudeStreamRuntime) finalize(stopReason string, deferEmptyOutput bool)
 		}
 		s.sendErrorWithCode(outcome.Error.Status, outcome.Error.Message, outcome.Error.Code)
 		return true
+	}
+	// A malformed tool-call attempt (corrupted DSML markup that parsed into
+	// no tool call) defers even when visible text exists: the model intended
+	// to call a tool, and a text-only terminal would end the caller's agent
+	// turn mid-task. The retry re-emits with a corrective suffix.
+	if deferEmptyOutput && !s.toolCallsDetected &&
+		assistantturn.ClassifyRetryKind(turn) == assistantturn.RetryKindMalformedToolCall {
+		s.deferredRetryKind = assistantturn.RetryKindMalformedToolCall
+		return false
 	}
 
 	s.ended = true
@@ -212,22 +220,4 @@ func (s *claudeStreamRuntime) finalize(stopReason string, deferEmptyOutput bool)
 	})
 	s.send("message_stop", map[string]any{"type": "message_stop"})
 	return true
-}
-
-func (s *claudeStreamRuntime) onFinalize(reason streamengine.StopReason, scannerErr error) {
-	if string(reason) == "upstream_error" {
-		if s.history != nil {
-			s.history.Error(500, s.upstreamErr, "upstream_error", responsehistory.ThinkingForArchive(s.rawThinking.String(), s.toolDetectionThinking.String(), s.thinking.String()), responsehistory.TextForArchive(s.rawText.String(), s.text.String()))
-		}
-		s.sendError(s.upstreamErr)
-		return
-	}
-	if scannerErr != nil {
-		if s.history != nil {
-			s.history.Error(500, scannerErr.Error(), "error", responsehistory.ThinkingForArchive(s.rawThinking.String(), s.toolDetectionThinking.String(), s.thinking.String()), responsehistory.TextForArchive(s.rawText.String(), s.text.String()))
-		}
-		s.sendError(scannerErr.Error())
-		return
-	}
-	s.finalize("end_turn", false)
 }

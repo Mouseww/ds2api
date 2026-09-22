@@ -4,6 +4,13 @@ import "strings"
 
 const EmptyOutputRetrySuffix = "Previous reply had no visible output. Please regenerate the visible final answer or tool call now."
 
+// MalformedToolCallRetrySuffix teaches the exact DSML tool-call format after
+// the model emitted a corrupted tool call (fullwidth ｜ pipes, doubled
+// parameter names, missing wrapper tags). The retry gives the model one more
+// chance to emit the call properly so the caller's agent loop receives a
+// structured tool call instead of a text-only response that ends its turn.
+const MalformedToolCallRetrySuffix = "Your previous reply contained a malformed tool call: the tool-call markup was corrupted (for example fullwidth ｜ characters instead of halfwidth |, doubled parameter names, or missing wrapper tags), so it could not be executed. Re-emit the tool call using exactly this format, with halfwidth | characters:\n<|DSML|tool_calls>\n<|DSML|invoke name=\"tool_name\">\n<|DSML|parameter name=\"parameter_name\"><![CDATA[value]]></|DSML|parameter>\n</|DSML|invoke>\n</|DSML|tool_calls>\nIf you did not intend to call a tool, reply with the final answer text only."
+
 func EmptyOutputRetryEnabled() bool {
 	return true
 }
@@ -42,6 +49,42 @@ func AppendEmptyOutputRetrySuffix(prompt string) string {
 }
 
 func UsagePromptWithEmptyOutputRetry(originalPrompt string, retryAttempts int) string {
+	return usagePromptWithRetrySuffix(originalPrompt, retryAttempts, AppendEmptyOutputRetrySuffix)
+}
+
+// ClonePayloadForMalformedToolCallRetry is the malformed-tool-call variant of
+// ClonePayloadForEmptyOutputRetry: same parent-message threading, corrective
+// suffix.
+func ClonePayloadForMalformedToolCallRetry(payload map[string]any, parentMessageID int) map[string]any {
+	clone := make(map[string]any, len(payload))
+	for k, v := range payload {
+		clone[k] = v
+	}
+	original, _ := payload["prompt"].(string)
+	clone["prompt"] = appendRetrySuffix(original, MalformedToolCallRetrySuffix)
+	if parentMessageID > 0 {
+		clone["parent_message_id"] = parentMessageID
+	}
+	return clone
+}
+
+// UsagePromptWithMalformedToolCallRetry is the malformed-tool-call variant of
+// UsagePromptWithEmptyOutputRetry.
+func UsagePromptWithMalformedToolCallRetry(originalPrompt string, retryAttempts int) string {
+	return usagePromptWithRetrySuffix(originalPrompt, retryAttempts, func(prompt string) string {
+		return appendRetrySuffix(prompt, MalformedToolCallRetrySuffix)
+	})
+}
+
+func appendRetrySuffix(prompt, suffix string) string {
+	prompt = strings.TrimRight(prompt, "\r\n\t ")
+	if prompt == "" {
+		return suffix
+	}
+	return prompt + "\n\n" + suffix
+}
+
+func usagePromptWithRetrySuffix(originalPrompt string, retryAttempts int, appendSuffix func(string) string) string {
 	if retryAttempts <= 0 {
 		return originalPrompt
 	}
@@ -49,7 +92,7 @@ func UsagePromptWithEmptyOutputRetry(originalPrompt string, retryAttempts int) s
 	parts = append(parts, originalPrompt)
 	next := originalPrompt
 	for i := 0; i < retryAttempts; i++ {
-		next = AppendEmptyOutputRetrySuffix(next)
+		next = appendSuffix(next)
 		parts = append(parts, next)
 	}
 	return strings.Join(parts, "\n")

@@ -109,6 +109,9 @@ func (h *Handler) handleStreamWithRetry(w http.ResponseWriter, r *http.Request, 
 		OnTerminal: func(attempts int) {
 			logChatStreamTerminal(streamRuntime, attempts)
 		},
+		RetryKind: func() assistantturn.RetryKind {
+			return streamRuntime.deferredRetryKind
+		},
 	})
 }
 

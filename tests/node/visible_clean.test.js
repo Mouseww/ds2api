@@ -11,7 +11,19 @@ const assert = require('node:assert/strict');
 const {
   createVisibleTextCleaner,
   applyRoleBlockSuppression,
+  detectMalformedDSMLToolAttempt,
+  stripLeakedToolMarkup,
 } = require('../../internal/js/chat-stream/visible_clean');
+
+// Verbatim text block of a production failure: a coding agent's model tried
+// to emit a grep tool call, but the DSML markup came out corrupted —
+// fullwidth doubled ｜ pipes, a doubled parameter-name attribute, a stray
+// CDATA close marker, and no wrapper/invoke open tags.
+const deadSubagentSpecimen = 'Now let me look at the turn finalization logic that decides empty-output retry.\n\n\n\n' +
+  '<｜｜DSML｜｜ parameter name="parameter name="pattern">func ShouldRetryEmptyOutput|func FinalizeTurn|func BuildTurnFromCollected]]</｜｜DSML｜｜ parameter>\n' +
+  '<｜｜DSML｜｜ parameter name="path">E:\\projects\\ds2api\\internal\\assistantturn</｜｜DSML｜｜ parameter>\n' +
+  '</｜｜DSML｜｜ invoke>\n' +
+  '</｜｜DSML｜｜ calls>';
 
 function cleanOnce(text) {
   return createVisibleTextCleaner().clean(text);
@@ -83,4 +95,29 @@ test('applyRoleBlockSuppression is exported for parity checks', () => {
   const res = applyRoleBlockSuppression('a<User>: echo', false);
   assert.equal(res.text, 'a');
   assert.equal(res.inside, true);
+});
+
+test('detectMalformedDSMLToolAttempt matches every corruption variant', () => {
+  assert.equal(detectMalformedDSMLToolAttempt(deadSubagentSpecimen), true, 'verbatim specimen');
+  assert.equal(detectMalformedDSMLToolAttempt('<｜｜DSML｜｜ parameter name="command">ls</｜｜DSML｜｜ parameter>'), true, 'fullwidth pipes');
+  assert.equal(detectMalformedDSMLToolAttempt('<｜｜DSML｜｜ invoke name="Bash">'), true, 'fullwidth invoke');
+  assert.equal(detectMalformedDSMLToolAttempt('<|DSML|parameter name="x">v</|DSML|parameter>'), true, 'halfwidth orphaned');
+  assert.equal(detectMalformedDSMLToolAttempt('<|DSML parameter name="file_path">/x</|DSML parameter>'), true, 'space separator');
+  assert.equal(detectMalformedDSMLToolAttempt('<DSMLparameter name="todos">x</DSMLparameter>'), true, 'collapsed');
+  assert.equal(detectMalformedDSMLToolAttempt('the format is <|DSML|tool_calls> and </|DSML|tool_calls>'), false, 'wrapper mention stays prose');
+  assert.equal(detectMalformedDSMLToolAttempt('普通文本 with <angle brackets>'), false, 'plain prose');
+  assert.equal(detectMalformedDSMLToolAttempt(''), false, 'empty');
+});
+
+test('stripLeakedToolMarkup removes corrupted DSML tags from visible text', () => {
+  const out = stripLeakedToolMarkup(deadSubagentSpecimen);
+  for (const tag of ['<｜｜DSML｜｜ parameter', '</｜｜DSML｜｜ parameter>', '</｜｜DSML｜｜ invoke>', '</｜｜DSML｜｜ calls>', 'DSML']) {
+    assert.ok(!out.includes(tag), `corrupted markup leaked: ${tag} in ${out}`);
+  }
+  assert.ok(out.includes('Now let me look at the turn finalization logic'), `answer text lost: ${out}`);
+});
+
+test('stripLeakedToolMarkup keeps prose mentions inside code spans', () => {
+  const prose = 'use `grep -E "a|b"` and see `<|DSML|tool_calls>` docs';
+  assert.equal(stripLeakedToolMarkup(prose), prose);
 });

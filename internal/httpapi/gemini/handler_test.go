@@ -402,16 +402,29 @@ func TestStreamGenerateContentEmitsSSE(t *testing.T) {
 }
 
 func TestNativeStreamGenerateContentEmitsThoughtParts(t *testing.T) {
-	h := &Handler{}
-	resp := makeGeminiUpstreamResponse(
-		`data: {"p":"response/thinking_content","v":"think"}`,
-		`data: {"p":"response/content","v":"answer"}`,
-		`data: [DONE]`,
-	)
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-2.5-pro:streamGenerateContent", nil)
+	ds := &testGeminiDS{
+		resp: makeGeminiUpstreamResponse(
+			`data: {"p":"response/thinking_content","v":"think"}`,
+			`data: {"p":"response/content","v":"answer"}`,
+			`data: [DONE]`,
+		),
+	}
+	h := &Handler{
+		Store: testGeminiConfig{},
+		Auth:  testGeminiAuth{},
+		DS:    ds,
+	}
+	r := chi.NewRouter()
+	RegisterRoutes(r, h)
 
-	h.handleStreamGenerateContent(rec, req, resp, "gemini-2.5-pro", "prompt", true, false, nil, nil)
+	body := `{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-2.5-pro:streamGenerateContent", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
 
 	frames := extractGeminiSSEFrames(t, rec.Body.String())
 	if len(frames) < 2 {

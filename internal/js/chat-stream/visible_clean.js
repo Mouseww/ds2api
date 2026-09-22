@@ -13,6 +13,12 @@
 // marker itself, because content after it is the model answering in its own
 // voice.
 
+const {
+  findToolMarkupTagOutsideIgnored,
+  findMatchingToolMarkupClose,
+  sanitizeLooseCDATA,
+} = require('../helpers/stream-tool-sieve/parse_payload');
+
 const REASONING_BLOCK = /\[reasoning_content\][\s\S]*?\[\/reasoning_content\]/g;
 const THINK_BLOCK = /<\s*think\s*>[\s\S]*?<\s*\/\s*think\s*>/gi;
 const THINK_TAG = /<\/?\s*think\s*>/gi;
@@ -94,6 +100,64 @@ function applyRoleBlockSuppression(text, inside) {
   return { text: out, inside: suppressed };
 }
 
+// malformedDSMLAttemptPattern matches DSML parameter/invoke tags in every
+// corruption variant observed in production transcripts (fullwidth doubled
+// ｜ pipes, halfwidth canonical, space separator, collapsed). Wrapper-only
+// mentions do not match: prose naming the wrapper is documentation, not an
+// attempt. Mirrors assistantturn.DetectMalformedToolCallAttempt in Go.
+const malformedDSMLAttemptPattern = /[<][｜|]{0,2}DSML[｜|]{0,2}\s*(?:parameter|invoke)/;
+
+// Detects a corrupted tool-call attempt in the RAW output text. Callers must
+// combine this with "no tool calls were parsed": a complete block the sieve
+// captured successfully is a working tool call, not a malformed attempt.
+function detectMalformedDSMLToolAttempt(text) {
+  if (!text) {
+    return false;
+  }
+  return malformedDSMLAttemptPattern.test(text);
+}
+
+// doubledParameterNamePattern collapses the doubled parameter-name attribute
+// the corrupted emission repeats (parameter name="parameter name="pattern").
+// The doubled quote breaks quote-aware tag scanning, so it is collapsed
+// before tool-markup stripping. Mirrors the Go sanitizer pre-pass.
+const doubledParameterNamePattern = /(parameter\s+name=")+/gi;
+
+// stripLeakedToolMarkup removes tool-call markup tags the sieve failed to
+// capture, keeping the surrounding (and inner) text. Mirrors Go
+// stripLeakedToolCallWrapperBlocks. Apply it to text AFTER the tool sieve so
+// complete tool calls are still captured from the raw stream.
+function stripLeakedToolMarkup(text) {
+  if (!text) {
+    return text;
+  }
+  let out = text.replace(doubledParameterNamePattern, 'parameter name="');
+  let buf = '';
+  let pos = 0;
+  while (pos < out.length) {
+    const tag = findToolMarkupTagOutsideIgnored(out, pos);
+    if (!tag) {
+      buf += out.slice(pos);
+      break;
+    }
+    if (tag.start > pos) {
+      buf += out.slice(pos, tag.start);
+    }
+    // A complete <tool_calls>...</tool_calls> block is stripped entirely.
+    if (!tag.closing && tag.name === 'tool_calls') {
+      const closeTag = findMatchingToolMarkupClose(out, tag);
+      if (closeTag) {
+        pos = closeTag.end + 1;
+        continue;
+      }
+    }
+    // Any other recognized tool-call markup tag is leaked markup: drop the
+    // tag itself while keeping the surrounding text.
+    pos = tag.end + 1;
+  }
+  return sanitizeLooseCDATA(buf);
+}
+
 function createVisibleTextCleaner() {
   let roleSuppressed = false;
   return {
@@ -128,4 +192,6 @@ function createVisibleTextCleaner() {
 module.exports = {
   createVisibleTextCleaner,
   applyRoleBlockSuppression,
+  detectMalformedDSMLToolAttempt,
+  stripLeakedToolMarkup,
 };

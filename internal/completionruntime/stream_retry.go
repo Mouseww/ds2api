@@ -34,6 +34,11 @@ type StreamRetryHooks struct {
 	OnRetryFailure  func(status int, message, code string)
 	OnAccountSwitch func(sessionID string)
 	OnTerminal      func(attempts int)
+	// RetryKind reports why the last attempt deferred: the malformed
+	// tool-call kind selects the corrective retry suffix that teaches the
+	// exact DSML format. Optional; zero value means the classic
+	// empty-output retry.
+	RetryKind func() assistantturn.RetryKind
 }
 
 func ExecuteStreamWithRetry(ctx context.Context, ds DeepSeekCaller, a *auth.RequestAuth, initialResp *http.Response, payload map[string]any, pow string, opts StreamRetryOptions, hooks StreamRetryHooks) {
@@ -112,13 +117,27 @@ func ExecuteStreamWithRetry(ctx context.Context, ds DeepSeekCaller, a *auth.Requ
 		if hooks.ParentMessageID != nil {
 			parentMessageID = hooks.ParentMessageID()
 		}
-		config.Logger.Info("[completion_runtime_empty_retry] attempting synthetic retry", "surface", surface, "stream", opts.Stream, "retry_attempt", attempts, "parent_message_id", parentMessageID)
+		// A malformed tool-call attempt (corrupted DSML markup that parsed
+		// into no tool call) retries with the corrective suffix even when
+		// visible text exists: the model intended to call a tool, and a
+		// text-only response would end the caller's agent turn mid-task.
+		retryKind := assistantturn.RetryKindEmptyOutput
+		if hooks.RetryKind != nil {
+			if k := hooks.RetryKind(); k != assistantturn.RetryKindNone {
+				retryKind = k
+			}
+		}
+		config.Logger.Info("[completion_runtime_empty_retry] attempting synthetic retry", "surface", surface, "stream", opts.Stream, "retry_attempt", attempts, "retry_kind", retryKind.String(), "parent_message_id", parentMessageID)
 		retryPow, powErr := ds.GetPow(ctx, a, maxAttempts)
 		if powErr != nil {
 			config.Logger.Warn("[completion_runtime_empty_retry] retry PoW fetch failed, falling back to original PoW", "surface", surface, "stream", opts.Stream, "retry_attempt", attempts, "error", powErr)
 			retryPow = pow
 		}
-		nextResp, err := ds.CallCompletion(ctx, a, shared.ClonePayloadForEmptyOutputRetry(currentPayload, parentMessageID), retryPow, maxAttempts)
+		retryPayload := shared.ClonePayloadForEmptyOutputRetry(currentPayload, parentMessageID)
+		if retryKind == assistantturn.RetryKindMalformedToolCall {
+			retryPayload = shared.ClonePayloadForMalformedToolCallRetry(currentPayload, parentMessageID)
+		}
+		nextResp, err := ds.CallCompletion(ctx, a, retryPayload, retryPow, maxAttempts)
 		if err != nil {
 			if hooks.OnRetryFailure != nil {
 				hooks.OnRetryFailure(http.StatusInternalServerError, "Failed to get completion.", "error")
@@ -174,7 +193,11 @@ func ExecuteStreamWithRetry(ctx context.Context, ds DeepSeekCaller, a *auth.Requ
 			hooks.OnRetry(attempts)
 		}
 		if hooks.OnRetryPrompt != nil {
-			hooks.OnRetryPrompt(shared.UsagePromptWithEmptyOutputRetry(opts.UsagePrompt, attempts))
+			if retryKind == assistantturn.RetryKindMalformedToolCall {
+				hooks.OnRetryPrompt(shared.UsagePromptWithMalformedToolCallRetry(opts.UsagePrompt, attempts))
+			} else {
+				hooks.OnRetryPrompt(shared.UsagePromptWithEmptyOutputRetry(opts.UsagePrompt, attempts))
+			}
 		}
 		currentResp = nextResp
 	}

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"ds2api/internal/assistantturn"
 	"ds2api/internal/responsehistory"
 	"ds2api/internal/sse"
 	streamengine "ds2api/internal/stream"
@@ -49,6 +50,11 @@ type claudeStreamRuntime struct {
 	ended              bool
 	upstreamErr        string
 	history            *responsehistory.Session
+
+	// deferredRetryKind records why finalize deferred the terminal write:
+	// the malformed tool-call kind makes the retry loop use the corrective
+	// suffix that teaches the exact DSML format.
+	deferredRetryKind assistantturn.RetryKind
 }
 
 func newClaudeStreamRuntime(

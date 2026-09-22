@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"ds2api/internal/assistantturn"
 	"ds2api/internal/auth"
 	"ds2api/internal/completionruntime"
 	"ds2api/internal/config"
@@ -308,71 +309,6 @@ func stripClaudeThinkingBlocks(raw []byte) []byte {
 	return out
 }
 
-func (h *Handler) handleClaudeStreamRealtime(w http.ResponseWriter, r *http.Request, resp *http.Response, model string, messages []any, thinkingEnabled, searchEnabled bool, toolNames []string, toolsRaw any, historySessions ...*responsehistory.Session) {
-	var historySession *responsehistory.Session
-	if len(historySessions) > 0 {
-		historySession = historySessions[0]
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		if detail := completionruntime.TryDetectCaptchaFromBody(body); detail != "" {
-			config.Logger.Warn("[claude_stream] captcha challenge detected on initial response", "detail", detail)
-		}
-		if historySession != nil {
-			historySession.Error(resp.StatusCode, strings.TrimSpace(string(body)), "error", "", "")
-		}
-		writeClaudeError(w, http.StatusInternalServerError, string(body))
-		return
-	}
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache, no-transform")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-	rc := http.NewResponseController(w)
-	_, canFlush := w.(http.Flusher)
-	if !canFlush {
-		config.Logger.Warn("[claude_stream] response writer does not support flush; streaming may be buffered")
-	}
-
-	streamRuntime := newClaudeStreamRuntime(
-		w,
-		rc,
-		canFlush,
-		model,
-		messages,
-		thinkingEnabled,
-		searchEnabled,
-		stripReferenceMarkersEnabled(),
-		toolNames,
-		toolsRaw,
-		buildClaudePromptTokenText(messages, thinkingEnabled),
-		historySession,
-	)
-	streamRuntime.sendMessageStart()
-
-	initialType := "text"
-	if thinkingEnabled {
-		initialType = "thinking"
-	}
-	streamengine.ConsumeSSE(streamengine.ConsumeConfig{
-		Context:             r.Context(),
-		Body:                resp.Body,
-		ThinkingEnabled:     thinkingEnabled,
-		InitialType:         initialType,
-		KeepAliveInterval:   claudeStreamPingInterval,
-		IdleTimeout:         claudeStreamIdleTimeout,
-		MaxKeepAliveNoInput: claudeStreamMaxKeepaliveCnt,
-	}, streamengine.ConsumeHooks{
-		OnKeepAlive: func() {
-			streamRuntime.sendPing()
-		},
-		OnParsed:   streamRuntime.onParsed,
-		OnFinalize: streamRuntime.onFinalize,
-	})
-}
-
 func (h *Handler) handleClaudeStreamRealtimeWithRetry(w http.ResponseWriter, r *http.Request, a *auth.RequestAuth, resp *http.Response, payload map[string]any, pow string, stdReq promptcompat.StandardRequest, model string, messages []any, thinkingEnabled, searchEnabled bool, toolNames []string, toolsRaw any, promptTokenText string, historySession *responsehistory.Session) {
 	if resp.StatusCode != http.StatusOK {
 		defer func() { _ = resp.Body.Close() }()
@@ -436,6 +372,9 @@ func (h *Handler) handleClaudeStreamRealtimeWithRetry(w http.ResponseWriter, r *
 		},
 		OnRetryFailure: func(status int, message, code string) {
 			streamRuntime.sendErrorWithCode(status, strings.TrimSpace(message), code)
+		},
+		RetryKind: func() assistantturn.RetryKind {
+			return streamRuntime.deferredRetryKind
 		},
 	})
 }

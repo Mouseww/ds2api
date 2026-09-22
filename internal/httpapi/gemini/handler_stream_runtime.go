@@ -20,54 +20,6 @@ import (
 )
 
 //nolint:unused // retained for native Gemini stream handling path.
-func (h *Handler) handleStreamGenerateContent(w http.ResponseWriter, r *http.Request, resp *http.Response, model, finalPrompt string, thinkingEnabled, searchEnabled bool, toolNames []string, toolsRaw any, historySessions ...*responsehistory.Session) {
-	var historySession *responsehistory.Session
-	if len(historySessions) > 0 {
-		historySession = historySessions[0]
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		if detail := completionruntime.TryDetectCaptchaFromBody(body); detail != "" {
-			config.Logger.Warn("[gemini_stream] captcha challenge detected on initial response", "detail", detail)
-		}
-		if historySession != nil {
-			historySession.Error(resp.StatusCode, strings.TrimSpace(string(body)), "error", "", "")
-		}
-		writeGeminiError(w, resp.StatusCode, strings.TrimSpace(string(body)))
-		return
-	}
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache, no-transform")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-
-	rc := http.NewResponseController(w)
-	_, canFlush := w.(http.Flusher)
-	runtime := newGeminiStreamRuntime(w, rc, canFlush, model, finalPrompt, thinkingEnabled, searchEnabled, stripReferenceMarkersEnabled(), toolNames, toolsRaw, historySession)
-
-	initialType := "text"
-	if thinkingEnabled {
-		initialType = "thinking"
-	}
-	streamengine.ConsumeSSE(streamengine.ConsumeConfig{
-		Context:             r.Context(),
-		Body:                resp.Body,
-		ThinkingEnabled:     thinkingEnabled,
-		InitialType:         initialType,
-		KeepAliveInterval:   time.Duration(dsprotocol.KeepAliveTimeout) * time.Second,
-		IdleTimeout:         time.Duration(dsprotocol.StreamIdleTimeout) * time.Second,
-		MaxKeepAliveNoInput: dsprotocol.MaxKeepaliveCount,
-	}, streamengine.ConsumeHooks{
-		OnParsed: runtime.onParsed,
-		OnFinalize: func(_ streamengine.StopReason, _ error) {
-			runtime.finalize(false)
-		},
-	})
-}
-
-//nolint:unused // retained for native Gemini stream handling path.
 type geminiStreamRuntime struct {
 	w        http.ResponseWriter
 	rc       *http.ResponseController
@@ -90,6 +42,11 @@ type geminiStreamRuntime struct {
 	finalErrorMessage string
 	finalErrorCode    string
 	history           *responsehistory.Session
+
+	// deferredRetryKind records why finalize deferred the terminal write:
+	// the malformed tool-call kind makes the retry loop use the corrective
+	// suffix that teaches the exact DSML format.
+	deferredRetryKind assistantturn.RetryKind
 }
 
 func (h *Handler) handleStreamGenerateContentWithRetry(w http.ResponseWriter, r *http.Request, a *auth.RequestAuth, resp *http.Response, payload map[string]any, pow string, stdReq promptcompat.StandardRequest, model, finalPrompt string, thinkingEnabled, searchEnabled bool, toolNames []string, toolsRaw any, historySession *responsehistory.Session) {
@@ -138,6 +95,9 @@ func (h *Handler) handleStreamGenerateContentWithRetry(w http.ResponseWriter, r 
 		},
 		OnRetryFailure: func(status int, message, _ string) {
 			runtime.sendErrorChunk(status, strings.TrimSpace(message))
+		},
+		RetryKind: func() assistantturn.RetryKind {
+			return runtime.deferredRetryKind
 		},
 	})
 }
@@ -329,6 +289,7 @@ func (s *geminiStreamRuntime) finalize(deferEmptyOutput bool) bool {
 	outcome := assistantturn.FinalizeTurn(turn, assistantturn.FinalizeOptions{})
 	if outcome.ShouldFail {
 		if deferEmptyOutput {
+			s.deferredRetryKind = assistantturn.ClassifyRetryKind(turn)
 			s.finalErrorStatus = outcome.Error.Status
 			s.finalErrorMessage = outcome.Error.Message
 			s.finalErrorCode = outcome.Error.Code
@@ -339,6 +300,15 @@ func (s *geminiStreamRuntime) finalize(deferEmptyOutput bool) bool {
 		}
 		s.sendErrorChunk(outcome.Error.Status, outcome.Error.Message)
 		return true
+	}
+	// A malformed tool-call attempt (corrupted DSML markup that parsed into
+	// no tool call) defers even when visible text exists: the model intended
+	// to call a tool, and a text-only terminal would end the caller's agent
+	// turn mid-task. The retry re-emits with a corrective suffix.
+	if deferEmptyOutput && len(turn.ToolCalls) == 0 &&
+		assistantturn.ClassifyRetryKind(turn) == assistantturn.RetryKindMalformedToolCall {
+		s.deferredRetryKind = assistantturn.RetryKindMalformedToolCall
+		return false
 	}
 	if s.history != nil {
 		s.history.Success(

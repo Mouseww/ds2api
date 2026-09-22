@@ -51,6 +51,11 @@ type chatStreamRuntime struct {
 	finalErrorStatus  int
 	finalErrorMessage string
 	finalErrorCode    string
+
+	// deferredRetryKind records why finalize deferred the terminal write:
+	// the malformed tool-call kind makes the retry loop use the corrective
+	// suffix that teaches the exact DSML format.
+	deferredRetryKind assistantturn.RetryKind
 }
 
 type chatDeltaBatch struct {
@@ -277,6 +282,7 @@ func (s *chatStreamRuntime) finalize(finishReason string, deferEmptyOutput bool)
 	if outcome.ShouldFail {
 		status, message, code := outcome.Error.Status, outcome.Error.Message, outcome.Error.Code
 		if deferEmptyOutput {
+			s.deferredRetryKind = assistantturn.ClassifyRetryKind(turn)
 			s.finalErrorStatus = status
 			s.finalErrorMessage = message
 			s.finalErrorCode = code
@@ -284,6 +290,15 @@ func (s *chatStreamRuntime) finalize(finishReason string, deferEmptyOutput bool)
 		}
 		s.sendFailedChunk(status, message, code)
 		return true
+	}
+	// A malformed tool-call attempt (corrupted DSML markup that parsed into
+	// no tool call) defers even when visible text exists: the model intended
+	// to call a tool, and a text-only terminal would end the caller's agent
+	// turn mid-task. The retry re-emits with a corrective suffix.
+	if deferEmptyOutput && !s.toolCallsEmitted && !s.toolCallsDoneEmitted &&
+		assistantturn.ClassifyRetryKind(turn) == assistantturn.RetryKindMalformedToolCall {
+		s.deferredRetryKind = assistantturn.RetryKindMalformedToolCall
+		return false
 	}
 	usage := assistantturn.OpenAIChatUsage(turn)
 	s.finalFinishReason = outcome.FinishReason

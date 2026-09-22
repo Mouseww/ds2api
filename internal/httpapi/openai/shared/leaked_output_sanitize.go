@@ -160,10 +160,17 @@ func applyRoleBlockSuppression(text string, inside bool) (string, bool) {
 	return b.String(), suppressed
 }
 
+// doubledParameterNamePattern collapses the doubled parameter-name attribute
+// the corrupted DSML emission repeats (parameter name="parameter
+// name="pattern"). The doubled quote breaks quote-aware tag scanning, so it
+// is collapsed before tool-markup stripping.
+var doubledParameterNamePattern = regexp.MustCompile(`(?i)(parameter\s+name=")+`)
+
 func stripLeakedToolCallWrapperBlocks(text string) string {
 	if text == "" {
 		return text
 	}
+	text = doubledParameterNamePattern.ReplaceAllString(text, `parameter name="`)
 	var b strings.Builder
 	pos := 0
 	for pos < len(text) {

@@ -2,6 +2,7 @@ package responses
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -9,25 +10,112 @@ import (
 	"strings"
 	"testing"
 
-	"ds2api/internal/promptcompat"
+	"ds2api/internal/auth"
+	dsclient "ds2api/internal/deepseek/client"
 )
 
-func TestHandleResponsesStreamDoesNotEmitReasoningTextCompatEvents(t *testing.T) {
-	h := &Handler{}
-	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-	rec := httptest.NewRecorder()
+// responsesFixtureDS is the upstream fake used by the production-path tests
+// below: every CallCompletion attempt replays the same SSE fixture body so the
+// empty-output retry observes a stable outcome.
+type responsesFixtureDS struct {
+	body  string
+	calls int
+}
 
+func (d *responsesFixtureDS) CreateSession(context.Context, *auth.RequestAuth, int) (string, error) {
+	return "session-id", nil
+}
+
+func (d *responsesFixtureDS) GetPow(context.Context, *auth.RequestAuth, int) (string, error) {
+	return "pow", nil
+}
+
+func (d *responsesFixtureDS) UploadFile(context.Context, *auth.RequestAuth, dsclient.UploadFileRequest, int) (*dsclient.UploadFileResult, error) {
+	return &dsclient.UploadFileResult{ID: "file-id"}, nil
+}
+
+func (d *responsesFixtureDS) CallCompletion(context.Context, *auth.RequestAuth, map[string]any, string, int) (*http.Response, error) {
+	d.calls++
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(d.body)),
+	}, nil
+}
+
+func (d *responsesFixtureDS) DeleteSessionForToken(context.Context, string, string) (*dsclient.DeleteSessionResult, error) {
+	return &dsclient.DeleteSessionResult{Success: true}, nil
+}
+
+func (d *responsesFixtureDS) DeleteAllSessionsForToken(context.Context, string) error {
+	return nil
+}
+
+// newResponsesProductionHandler wires the dependencies the real h.Responses
+// entry point needs: a config store (model resolution + response-store TTL), a
+// direct-token auth resolver and the upstream SSE fixture fake.
+func newResponsesProductionHandler(t *testing.T, sseBody string) (*Handler, *responsesFixtureDS) {
+	t.Helper()
+	store, resolver := newDirectTokenResolver(t)
+	ds := &responsesFixtureDS{body: sseBody}
+	return &Handler{Store: store, Auth: resolver, DS: ds}, ds
+}
+
+// postResponsesJSON drives the production entry point h.Responses with a
+// Responses-shaped body and a direct-token Authorization header.
+func postResponsesJSON(t *testing.T, h *Handler, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer token-a")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.Responses(rec, req)
+	return rec
+}
+
+// responsesRequestJSON builds a Responses request body. "thinking" is set
+// explicitly because the production path derives the thinking flag from the
+// request and GetModelConfig defaults it to true for every supported model.
+func responsesRequestJSON(t *testing.T, model, input string, stream, thinking bool, tools []string, toolChoice any) string {
+	t.Helper()
+	req := map[string]any{
+		"model":    model,
+		"input":    input,
+		"stream":   stream,
+		"thinking": thinking,
+	}
+	if len(tools) > 0 {
+		rawTools := make([]any, 0, len(tools))
+		for _, name := range tools {
+			rawTools = append(rawTools, map[string]any{
+				"type": "function",
+				"function": map[string]any{
+					"name":       name,
+					"parameters": map[string]any{"type": "object"},
+				},
+			})
+		}
+		req["tools"] = rawTools
+	}
+	if toolChoice != nil {
+		req["tool_choice"] = toolChoice
+	}
+	raw, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal responses request: %v", err)
+	}
+	return string(raw)
+}
+
+func TestHandleResponsesStreamDoesNotEmitReasoningTextCompatEvents(t *testing.T) {
 	b, _ := json.Marshal(map[string]any{
 		"p": "response/thinking_content",
 		"v": "thought",
 	})
 	streamBody := "data: " + string(b) + "\n" + "data: [DONE]\n"
-	resp := &http.Response{
-		StatusCode: http.StatusOK,
-		Body:       io.NopCloser(strings.NewReader(streamBody)),
-	}
+	h, _ := newResponsesProductionHandler(t, streamBody)
 
-	h.handleResponsesStream(rec, req, resp, "owner-a", "resp_test", "deepseek-v4-pro", "prompt", 0, true, false, nil, nil, promptcompat.DefaultToolChoicePolicy(), "")
+	rec := postResponsesJSON(t, h, responsesRequestJSON(t, "deepseek-v4-pro", "hi", true, true, nil, nil))
 
 	body := rec.Body.String()
 	if !strings.Contains(body, "event: response.reasoning.delta") {
@@ -39,10 +127,6 @@ func TestHandleResponsesStreamDoesNotEmitReasoningTextCompatEvents(t *testing.T)
 }
 
 func TestHandleResponsesStreamEmitsOutputTextDoneBeforeContentPartDone(t *testing.T) {
-	h := &Handler{}
-	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-	rec := httptest.NewRecorder()
-
 	sseLine := func(v string) string {
 		b, _ := json.Marshal(map[string]any{
 			"p": "response/content",
@@ -52,12 +136,9 @@ func TestHandleResponsesStreamEmitsOutputTextDoneBeforeContentPartDone(t *testin
 	}
 
 	streamBody := sseLine("hello") + "data: [DONE]\n"
-	resp := &http.Response{
-		StatusCode: http.StatusOK,
-		Body:       io.NopCloser(strings.NewReader(streamBody)),
-	}
+	h, _ := newResponsesProductionHandler(t, streamBody)
 
-	h.handleResponsesStream(rec, req, resp, "owner-a", "resp_test", "deepseek-v4-flash", "prompt", 0, false, false, nil, nil, promptcompat.DefaultToolChoicePolicy(), "")
+	rec := postResponsesJSON(t, h, responsesRequestJSON(t, "deepseek-v4-flash", "hi", true, false, nil, nil))
 	body := rec.Body.String()
 	if !strings.Contains(body, "event: response.output_text.done") {
 		t.Fatalf("expected response.output_text.done payload, body=%s", body)
@@ -73,10 +154,6 @@ func TestHandleResponsesStreamEmitsOutputTextDoneBeforeContentPartDone(t *testin
 }
 
 func TestHandleResponsesStreamOutputTextDeltaCarriesItemIndexes(t *testing.T) {
-	h := &Handler{}
-	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-	rec := httptest.NewRecorder()
-
 	sseLine := func(v string) string {
 		b, _ := json.Marshal(map[string]any{
 			"p": "response/content",
@@ -86,12 +163,9 @@ func TestHandleResponsesStreamOutputTextDeltaCarriesItemIndexes(t *testing.T) {
 	}
 
 	streamBody := sseLine("hello") + "data: [DONE]\n"
-	resp := &http.Response{
-		StatusCode: http.StatusOK,
-		Body:       io.NopCloser(strings.NewReader(streamBody)),
-	}
+	h, _ := newResponsesProductionHandler(t, streamBody)
 
-	h.handleResponsesStream(rec, req, resp, "owner-a", "resp_test", "deepseek-v4-flash", "prompt", 0, false, false, nil, nil, promptcompat.DefaultToolChoicePolicy(), "")
+	rec := postResponsesJSON(t, h, responsesRequestJSON(t, "deepseek-v4-flash", "hi", true, false, nil, nil))
 	body := rec.Body.String()
 
 	deltaPayload, ok := extractSSEEventPayload(body, "response.output_text.delta")
@@ -110,10 +184,6 @@ func TestHandleResponsesStreamOutputTextDeltaCarriesItemIndexes(t *testing.T) {
 }
 
 func TestHandleResponsesStreamCoalescesSmallOutputTextDeltas(t *testing.T) {
-	h := &Handler{}
-	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-	rec := httptest.NewRecorder()
-
 	var streamBody strings.Builder
 	for i := 0; i < 100; i++ {
 		b, _ := json.Marshal(map[string]any{
@@ -125,12 +195,9 @@ func TestHandleResponsesStreamCoalescesSmallOutputTextDeltas(t *testing.T) {
 		streamBody.WriteString("\n")
 	}
 	streamBody.WriteString("data: [DONE]\n")
-	resp := &http.Response{
-		StatusCode: http.StatusOK,
-		Body:       io.NopCloser(strings.NewReader(streamBody.String())),
-	}
+	h, _ := newResponsesProductionHandler(t, streamBody.String())
 
-	h.handleResponsesStream(rec, req, resp, "owner-a", "resp_coalesce", "deepseek-v4-flash", "prompt", 0, false, false, nil, nil, promptcompat.DefaultToolChoicePolicy(), "")
+	rec := postResponsesJSON(t, h, responsesRequestJSON(t, "deepseek-v4-flash", "hi", true, false, nil, nil))
 
 	payloads := extractSSEEventPayloads(rec.Body.String(), "response.output_text.delta")
 	if len(payloads) == 0 {
@@ -152,10 +219,6 @@ func TestHandleResponsesStreamCoalescesSmallOutputTextDeltas(t *testing.T) {
 }
 
 func TestHandleResponsesStreamEmitsDistinctToolCallIDsAcrossSeparateToolBlocks(t *testing.T) {
-	h := &Handler{}
-	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-	rec := httptest.NewRecorder()
-
 	sseLine := func(v string) string {
 		b, _ := json.Marshal(map[string]any{
 			"p": "response/content",
@@ -167,12 +230,9 @@ func TestHandleResponsesStreamEmitsDistinctToolCallIDsAcrossSeparateToolBlocks(t
 	streamBody := sseLine("前置文本\n<tool_calls>\n  <invoke name=\"read_file\">\n    <parameter name=\"path\">README.MD</parameter>\n  </invoke>\n</tool_calls>") +
 		sseLine("中间文本\n<tool_calls>\n  <invoke name=\"search\">\n    <parameter name=\"q\">golang</parameter>\n  </invoke>\n</tool_calls>") +
 		"data: [DONE]\n"
-	resp := &http.Response{
-		StatusCode: http.StatusOK,
-		Body:       io.NopCloser(strings.NewReader(streamBody)),
-	}
+	h, _ := newResponsesProductionHandler(t, streamBody)
 
-	h.handleResponsesStream(rec, req, resp, "owner-a", "resp_test", "deepseek-v4-flash", "prompt", 0, false, false, []string{"read_file", "search"}, nil, promptcompat.DefaultToolChoicePolicy(), "")
+	rec := postResponsesJSON(t, h, responsesRequestJSON(t, "deepseek-v4-flash", "hi", true, false, []string{"read_file", "search"}, nil))
 
 	body := rec.Body.String()
 	doneEvents := extractSSEEventPayloads(body, "response.function_call_arguments.done")
@@ -203,10 +263,6 @@ func TestHandleResponsesStreamEmitsDistinctToolCallIDsAcrossSeparateToolBlocks(t
 }
 
 func TestHandleResponsesStreamRequiredToolChoiceFailure(t *testing.T) {
-	h := &Handler{}
-	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-	rec := httptest.NewRecorder()
-
 	sseLine := func(v string) string {
 		b, _ := json.Marshal(map[string]any{
 			"p": "response/content",
@@ -216,16 +272,9 @@ func TestHandleResponsesStreamRequiredToolChoiceFailure(t *testing.T) {
 	}
 
 	streamBody := sseLine("plain text only") + "data: [DONE]\n"
-	resp := &http.Response{
-		StatusCode: http.StatusOK,
-		Body:       io.NopCloser(strings.NewReader(streamBody)),
-	}
+	h, _ := newResponsesProductionHandler(t, streamBody)
 
-	policy := promptcompat.ToolChoicePolicy{
-		Mode:    promptcompat.ToolChoiceRequired,
-		Allowed: map[string]struct{}{"read_file": {}},
-	}
-	h.handleResponsesStream(rec, req, resp, "owner-a", "resp_test", "deepseek-v4-flash", "prompt", 0, false, false, []string{"read_file"}, nil, policy, "")
+	rec := postResponsesJSON(t, h, responsesRequestJSON(t, "deepseek-v4-flash", "hi", true, false, []string{"read_file"}, "required"))
 
 	body := rec.Body.String()
 	if !strings.Contains(body, "event: response.failed") {
@@ -237,10 +286,6 @@ func TestHandleResponsesStreamRequiredToolChoiceFailure(t *testing.T) {
 }
 
 func TestHandleResponsesStreamFailsWhenUpstreamHasOnlyThinking(t *testing.T) {
-	h := &Handler{}
-	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-	rec := httptest.NewRecorder()
-
 	sseLine := func(path, value string) string {
 		b, _ := json.Marshal(map[string]any{
 			"p": path,
@@ -250,12 +295,9 @@ func TestHandleResponsesStreamFailsWhenUpstreamHasOnlyThinking(t *testing.T) {
 	}
 
 	streamBody := sseLine("response/thinking_content", "Only thinking") + "data: [DONE]\n"
-	resp := &http.Response{
-		StatusCode: http.StatusOK,
-		Body:       io.NopCloser(strings.NewReader(streamBody)),
-	}
+	h, ds := newResponsesProductionHandler(t, streamBody)
 
-	h.handleResponsesStream(rec, req, resp, "owner-a", "resp_test", "deepseek-v4-pro", "prompt", 0, true, false, nil, nil, promptcompat.DefaultToolChoicePolicy(), "")
+	rec := postResponsesJSON(t, h, responsesRequestJSON(t, "deepseek-v4-pro", "hi", true, true, nil, nil))
 
 	body := rec.Body.String()
 	if !strings.Contains(body, "event: response.failed") {
@@ -272,13 +314,15 @@ func TestHandleResponsesStreamFailsWhenUpstreamHasOnlyThinking(t *testing.T) {
 	if asString(errObj["code"]) != "upstream_empty_output" {
 		t.Fatalf("expected code=upstream_empty_output, got %#v", payload)
 	}
+	// The production stream path runs the shared empty-output retry: the
+	// thinking-only attempt is deferred and replayed once against the same
+	// fixture before the terminal failure is written.
+	if ds.calls < 2 {
+		t.Fatalf("expected empty-output retry to re-call upstream, calls=%d", ds.calls)
+	}
 }
 
 func TestHandleResponsesStreamPromotesThinkingToolCallsOnFinalizeWithoutMidstreamIntercept(t *testing.T) {
-	h := &Handler{}
-	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-	rec := httptest.NewRecorder()
-
 	sseLine := func(path, value string) string {
 		b, _ := json.Marshal(map[string]any{
 			"p": path,
@@ -288,12 +332,9 @@ func TestHandleResponsesStreamPromotesThinkingToolCallsOnFinalizeWithoutMidstrea
 	}
 
 	streamBody := sseLine("response/thinking_content", `<tool_calls><invoke name="read_file"><parameter name="path">README.MD</parameter></invoke></tool_calls>`) + "data: [DONE]\n"
-	resp := &http.Response{
-		StatusCode: http.StatusOK,
-		Body:       io.NopCloser(strings.NewReader(streamBody)),
-	}
+	h, _ := newResponsesProductionHandler(t, streamBody)
 
-	h.handleResponsesStream(rec, req, resp, "owner-a", "resp_test", "deepseek-v4-pro", "prompt", 0, true, false, []string{"read_file"}, nil, promptcompat.DefaultToolChoicePolicy(), "")
+	rec := postResponsesJSON(t, h, responsesRequestJSON(t, "deepseek-v4-pro", "hi", true, true, []string{"read_file"}, nil))
 
 	body := rec.Body.String()
 	if strings.Contains(body, "event: response.reasoning.delta") {
@@ -308,10 +349,6 @@ func TestHandleResponsesStreamPromotesThinkingToolCallsOnFinalizeWithoutMidstrea
 }
 
 func TestHandleResponsesStreamPromotesHiddenThinkingDSMLToolCallsOnFinalize(t *testing.T) {
-	h := &Handler{}
-	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-	rec := httptest.NewRecorder()
-
 	sseLine := func(path, value string) string {
 		b, _ := json.Marshal(map[string]any{
 			"p": path,
@@ -321,16 +358,9 @@ func TestHandleResponsesStreamPromotesHiddenThinkingDSMLToolCallsOnFinalize(t *t
 	}
 
 	streamBody := sseLine("response/thinking_content", `<|DSML|tool_calls><|DSML|invoke name="read_file"><|DSML|parameter name="path">README.MD</|DSML|parameter></|DSML|invoke></|DSML|tool_calls>`) + "data: [DONE]\n"
-	resp := &http.Response{
-		StatusCode: http.StatusOK,
-		Body:       io.NopCloser(strings.NewReader(streamBody)),
-	}
+	h, _ := newResponsesProductionHandler(t, streamBody)
 
-	policy := promptcompat.ToolChoicePolicy{
-		Mode:    promptcompat.ToolChoiceRequired,
-		Allowed: map[string]struct{}{"read_file": {}},
-	}
-	h.handleResponsesStream(rec, req, resp, "owner-a", "resp_hidden", "deepseek-v4-pro", "prompt", 0, false, false, []string{"read_file"}, nil, policy, "")
+	rec := postResponsesJSON(t, h, responsesRequestJSON(t, "deepseek-v4-pro", "hi", true, false, []string{"read_file"}, "required"))
 
 	body := rec.Body.String()
 	if strings.Contains(body, "event: response.reasoning.delta") {
@@ -345,21 +375,11 @@ func TestHandleResponsesStreamPromotesHiddenThinkingDSMLToolCallsOnFinalize(t *t
 }
 
 func TestHandleResponsesNonStreamRequiredToolChoiceViolation(t *testing.T) {
-	h := &Handler{}
-	rec := httptest.NewRecorder()
-	resp := &http.Response{
-		StatusCode: http.StatusOK,
-		Body: io.NopCloser(strings.NewReader(
-			`data: {"p":"response/content","v":"plain text only"}` + "\n" +
-				`data: [DONE]` + "\n",
-		)),
-	}
-	policy := promptcompat.ToolChoicePolicy{
-		Mode:    promptcompat.ToolChoiceRequired,
-		Allowed: map[string]struct{}{"read_file": {}},
-	}
+	streamBody := `data: {"p":"response/content","v":"plain text only"}` + "\n" +
+		`data: [DONE]` + "\n"
+	h, _ := newResponsesProductionHandler(t, streamBody)
 
-	h.handleResponsesNonStream(rec, resp, "owner-a", "resp_test", "deepseek-v4-flash", "prompt", 0, false, false, []string{"read_file"}, nil, policy, "")
+	rec := postResponsesJSON(t, h, responsesRequestJSON(t, "deepseek-v4-flash", "hi", false, false, []string{"read_file"}, "required"))
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("expected 422 for required tool_choice violation, got %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -371,22 +391,12 @@ func TestHandleResponsesNonStreamRequiredToolChoiceViolation(t *testing.T) {
 }
 
 func TestHandleResponsesNonStreamRequiredToolChoiceIgnoresThinkingToolPayloadWhenTextExists(t *testing.T) {
-	h := &Handler{}
-	rec := httptest.NewRecorder()
-	resp := &http.Response{
-		StatusCode: http.StatusOK,
-		Body: io.NopCloser(strings.NewReader(
-			`data: {"p":"response/thinking_content","v":"{\"tool_calls\":[{\"name\":\"read_file\",\"input\":{\"path\":\"README.MD\"}}]}"}` + "\n" +
-				`data: {"p":"response/content","v":"plain text only"}` + "\n" +
-				`data: [DONE]` + "\n",
-		)),
-	}
-	policy := promptcompat.ToolChoicePolicy{
-		Mode:    promptcompat.ToolChoiceRequired,
-		Allowed: map[string]struct{}{"read_file": {}},
-	}
+	streamBody := `data: {"p":"response/thinking_content","v":"{\"tool_calls\":[{\"name\":\"read_file\",\"input\":{\"path\":\"README.MD\"}}]}"}` + "\n" +
+		`data: {"p":"response/content","v":"plain text only"}` + "\n" +
+		`data: [DONE]` + "\n"
+	h, _ := newResponsesProductionHandler(t, streamBody)
 
-	h.handleResponsesNonStream(rec, resp, "owner-a", "resp_test", "deepseek-v4-flash", "prompt", 0, true, false, []string{"read_file"}, nil, policy, "")
+	rec := postResponsesJSON(t, h, responsesRequestJSON(t, "deepseek-v4-flash", "hi", false, true, []string{"read_file"}, "required"))
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("expected 422 for required tool_choice violation, got %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -398,17 +408,11 @@ func TestHandleResponsesNonStreamRequiredToolChoiceIgnoresThinkingToolPayloadWhe
 }
 
 func TestHandleResponsesNonStreamSingleAttemptReturns503WhenUpstreamOutputEmpty(t *testing.T) {
-	h := &Handler{}
-	rec := httptest.NewRecorder()
-	resp := &http.Response{
-		StatusCode: http.StatusOK,
-		Body: io.NopCloser(strings.NewReader(
-			`data: {"p":"response/content","v":""}` + "\n" +
-				`data: [DONE]` + "\n",
-		)),
-	}
+	streamBody := `data: {"p":"response/content","v":""}` + "\n" +
+		`data: [DONE]` + "\n"
+	h, ds := newResponsesProductionHandler(t, streamBody)
 
-	h.handleResponsesNonStream(rec, resp, "owner-a", "resp_test", "deepseek-v4-flash", "prompt", 0, false, false, nil, nil, promptcompat.DefaultToolChoicePolicy(), "")
+	rec := postResponsesJSON(t, h, responsesRequestJSON(t, "deepseek-v4-flash", "hi", false, false, nil, nil))
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503 for empty upstream output, got %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -417,20 +421,19 @@ func TestHandleResponsesNonStreamSingleAttemptReturns503WhenUpstreamOutputEmpty(
 	if asString(errObj["code"]) != "upstream_unavailable" {
 		t.Fatalf("expected code=upstream_unavailable, got %#v", out)
 	}
+	// Production enables the shared empty-output retry, so the empty first
+	// attempt is replayed once (same fixture) before the terminal error.
+	if ds.calls < 2 {
+		t.Fatalf("expected empty-output retry to re-call upstream, calls=%d", ds.calls)
+	}
 }
 
 func TestHandleResponsesNonStreamSingleAttemptReturnsContentFilterErrorWhenUpstreamFilteredWithoutOutput(t *testing.T) {
-	h := &Handler{}
-	rec := httptest.NewRecorder()
-	resp := &http.Response{
-		StatusCode: http.StatusOK,
-		Body: io.NopCloser(strings.NewReader(
-			`data: {"code":"content_filter"}` + "\n" +
-				`data: [DONE]` + "\n",
-		)),
-	}
+	streamBody := `data: {"code":"content_filter"}` + "\n" +
+		`data: [DONE]` + "\n"
+	h, ds := newResponsesProductionHandler(t, streamBody)
 
-	h.handleResponsesNonStream(rec, resp, "owner-a", "resp_test", "deepseek-v4-flash", "prompt", 0, false, false, nil, nil, promptcompat.DefaultToolChoicePolicy(), "")
+	rec := postResponsesJSON(t, h, responsesRequestJSON(t, "deepseek-v4-flash", "hi", false, false, nil, nil))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for filtered empty upstream output, got %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -439,20 +442,18 @@ func TestHandleResponsesNonStreamSingleAttemptReturnsContentFilterErrorWhenUpstr
 	if asString(errObj["code"]) != "content_filter" {
 		t.Fatalf("expected code=content_filter, got %#v", out)
 	}
+	// Content-filtered turns are not retried by the shared empty-output retry.
+	if ds.calls != 1 {
+		t.Fatalf("expected no retry for content_filter, calls=%d", ds.calls)
+	}
 }
 
 func TestHandleResponsesNonStreamSingleAttemptReturns429WhenUpstreamHasOnlyThinking(t *testing.T) {
-	h := &Handler{}
-	rec := httptest.NewRecorder()
-	resp := &http.Response{
-		StatusCode: http.StatusOK,
-		Body: io.NopCloser(strings.NewReader(
-			`data: {"p":"response/thinking_content","v":"Only thinking"}` + "\n" +
-				`data: [DONE]` + "\n",
-		)),
-	}
+	streamBody := `data: {"p":"response/thinking_content","v":"Only thinking"}` + "\n" +
+		`data: [DONE]` + "\n"
+	h, ds := newResponsesProductionHandler(t, streamBody)
 
-	h.handleResponsesNonStream(rec, resp, "owner-a", "resp_test", "deepseek-v4-pro", "prompt", 0, true, false, nil, nil, promptcompat.DefaultToolChoicePolicy(), "")
+	rec := postResponsesJSON(t, h, responsesRequestJSON(t, "deepseek-v4-pro", "hi", false, true, nil, nil))
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("expected 429 for thinking-only upstream output, got %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -461,20 +462,19 @@ func TestHandleResponsesNonStreamSingleAttemptReturns429WhenUpstreamHasOnlyThink
 	if asString(errObj["code"]) != "upstream_empty_output" {
 		t.Fatalf("expected code=upstream_empty_output, got %#v", out)
 	}
+	// Thinking-only output is retryable on the production path: the fixture is
+	// replayed once (same empty outcome) before the 429 is returned.
+	if ds.calls < 2 {
+		t.Fatalf("expected empty-output retry to re-call upstream, calls=%d", ds.calls)
+	}
 }
 
 func TestHandleResponsesNonStreamPromotesThinkingToolCallsWhenTextEmpty(t *testing.T) {
-	h := &Handler{}
-	rec := httptest.NewRecorder()
-	resp := &http.Response{
-		StatusCode: http.StatusOK,
-		Body: io.NopCloser(strings.NewReader(
-			`data: {"p":"response/thinking_content","v":"<tool_calls><invoke name=\"read_file\"><parameter name=\"path\">README.MD</parameter></invoke></tool_calls>"}` + "\n" +
-				`data: [DONE]` + "\n",
-		)),
-	}
+	streamBody := `data: {"p":"response/thinking_content","v":"<tool_calls><invoke name=\"read_file\"><parameter name=\"path\">README.MD</parameter></invoke></tool_calls>"}` + "\n" +
+		`data: [DONE]` + "\n"
+	h, _ := newResponsesProductionHandler(t, streamBody)
 
-	h.handleResponsesNonStream(rec, resp, "owner-a", "resp_test", "deepseek-v4-pro", "prompt", 0, true, false, []string{"read_file"}, nil, promptcompat.DefaultToolChoicePolicy(), "")
+	rec := postResponsesJSON(t, h, responsesRequestJSON(t, "deepseek-v4-pro", "hi", false, true, []string{"read_file"}, nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200 for thinking tool calls, got %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -490,21 +490,11 @@ func TestHandleResponsesNonStreamPromotesThinkingToolCallsWhenTextEmpty(t *testi
 }
 
 func TestHandleResponsesNonStreamPromotesHiddenThinkingDSMLToolCallsWhenTextEmpty(t *testing.T) {
-	h := &Handler{}
-	rec := httptest.NewRecorder()
-	resp := &http.Response{
-		StatusCode: http.StatusOK,
-		Body: io.NopCloser(strings.NewReader(
-			`data: {"p":"response/thinking_content","v":"<|DSML|tool_calls><|DSML|invoke name=\"read_file\"><|DSML|parameter name=\"path\">README.MD</|DSML|parameter></|DSML|invoke></|DSML|tool_calls>"}` + "\n" +
-				`data: [DONE]` + "\n",
-		)),
-	}
+	streamBody := `data: {"p":"response/thinking_content","v":"<|DSML|tool_calls><|DSML|invoke name=\"read_file\"><|DSML|parameter name=\"path\">README.MD</|DSML|parameter></|DSML|invoke></|DSML|tool_calls>"}` + "\n" +
+		`data: [DONE]` + "\n"
+	h, _ := newResponsesProductionHandler(t, streamBody)
 
-	policy := promptcompat.ToolChoicePolicy{
-		Mode:    promptcompat.ToolChoiceRequired,
-		Allowed: map[string]struct{}{"read_file": {}},
-	}
-	h.handleResponsesNonStream(rec, resp, "owner-a", "resp_hidden", "deepseek-v4-pro", "prompt", 0, false, false, []string{"read_file"}, nil, policy, "")
+	rec := postResponsesJSON(t, h, responsesRequestJSON(t, "deepseek-v4-pro", "hi", false, false, []string{"read_file"}, "required"))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200 for hidden thinking tool calls, got %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -523,9 +513,6 @@ func TestHandleResponsesNonStreamPromotesHiddenThinkingDSMLToolCallsWhenTextEmpt
 }
 
 func TestHandleResponsesStreamCoercesSchemaDeclaredStringArguments(t *testing.T) {
-	h := &Handler{}
-	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-	rec := httptest.NewRecorder()
 	toolsRaw := []any{
 		map[string]any{
 			"type": "function",
@@ -546,12 +533,20 @@ func TestHandleResponsesStreamCoercesSchemaDeclaredStringArguments(t *testing.T)
 		return "data: " + string(b) + "\n"
 	}
 	streamBody := sseLine(`<tool_calls><invoke name="Write">{"input":{"content":{"message":"hi"},"taskId":1}}</invoke></tool_calls>`) + "data: [DONE]\n"
-	resp := &http.Response{
-		StatusCode: http.StatusOK,
-		Body:       io.NopCloser(strings.NewReader(streamBody)),
+	h, _ := newResponsesProductionHandler(t, streamBody)
+
+	reqBody, err := json.Marshal(map[string]any{
+		"model":    "deepseek-v4-flash",
+		"input":    "hi",
+		"stream":   true,
+		"thinking": false,
+		"tools":    toolsRaw,
+	})
+	if err != nil {
+		t.Fatalf("marshal responses request: %v", err)
 	}
 
-	h.handleResponsesStream(rec, req, resp, "owner-a", "resp_string_protect", "deepseek-v4-flash", "prompt", 0, false, false, []string{"Write"}, toolsRaw, promptcompat.DefaultToolChoicePolicy(), "")
+	rec := postResponsesJSON(t, h, string(reqBody))
 
 	payload, ok := extractSSEEventPayload(rec.Body.String(), "response.function_call_arguments.done")
 	if !ok {

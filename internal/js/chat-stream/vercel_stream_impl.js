@@ -32,11 +32,22 @@ const {
 const {
   trimContinuationOverlap,
 } = require('./dedupe');
-const { createVisibleTextCleaner } = require('./visible_clean');
+const {
+  createVisibleTextCleaner,
+  detectMalformedDSMLToolAttempt,
+  stripLeakedToolMarkup,
+} = require('./visible_clean');
 
 const DEEPSEEK_COMPLETION_URL = 'https://chat.deepseek.com/api/v0/chat/completion';
 const DEEPSEEK_CONTINUE_URL = 'https://chat.deepseek.com/api/v0/chat/continue';
 const EMPTY_OUTPUT_RETRY_SUFFIX = 'Previous reply had no visible output. Please regenerate the visible final answer or tool call now.';
+// Teaches the exact DSML tool-call format after the model emitted a
+// corrupted tool call (fullwidth ｜ pipes, doubled parameter names, missing
+// wrapper tags). The retry gives the model one more chance to emit the call
+// properly so the caller's agent loop receives a structured tool call
+// instead of a text-only response that ends its turn mid-task. Mirrors
+// shared.MalformedToolCallRetrySuffix in Go.
+const MALFORMED_TOOL_CALL_RETRY_SUFFIX = 'Your previous reply contained a malformed tool call: the tool-call markup was corrupted (for example fullwidth ｜ characters instead of halfwidth |, doubled parameter names, or missing wrapper tags), so it could not be executed. Re-emit the tool call using exactly this format, with halfwidth | characters:\n<|DSML|tool_calls>\n<|DSML|invoke name="tool_name">\n<|DSML|parameter name="parameter_name"><![CDATA[value]]></|DSML|parameter>\n</|DSML|invoke>\n</|DSML|tool_calls>\nIf you did not intend to call a tool, reply with the final answer text only.';
 const EMPTY_OUTPUT_RETRY_MAX_ATTEMPTS = 1;
 const AUTO_CONTINUE_MAX_ROUNDS = 8;
 
@@ -181,6 +192,9 @@ async function handleVercelStream(req, res, rawBody, payload) {
     // usage are decided on it). outputText stays raw for tool detection.
     let visibleOutputText = '';
     const visibleCleaner = createVisibleTextCleaner();
+    // Why the last finish() deferred: 'malformed_tool_call' makes the retry
+    // loop use the corrective suffix that teaches the exact DSML format.
+    let deferredRetryReason = '';
     let usagePrompt = finalPrompt;
     const toolSieveEnabled = toolPolicy.toolSieveEnabled;
     const toolSieveState = createToolSieveState();
@@ -209,6 +223,7 @@ async function handleVercelStream(req, res, rawBody, payload) {
         await releaseLease();
         return true;
       }
+      deferredRetryReason = '';
       deltaCoalescer.flush();
       const detected = parseStandaloneToolCalls(outputText, toolNames);
       if (detected.length > 0 && !toolCallsDoneEmitted) {
@@ -227,7 +242,11 @@ async function handleVercelStream(req, res, rawBody, payload) {
             continue;
           }
           if (evt.text) {
-            deltaCoalescer.append('content', evt.text);
+            const emitted = stripLeakedToolMarkup(evt.text);
+            if (emitted) {
+              visibleOutputText += emitted;
+              deltaCoalescer.append('content', emitted);
+            }
           }
         }
         deltaCoalescer.flush();
@@ -237,6 +256,7 @@ async function handleVercelStream(req, res, rawBody, payload) {
       }
       if (detected.length === 0 && !toolCallsEmitted && visibleOutputText.trim() === '') {
         if (options.deferEmpty && reason !== 'content_filter') {
+          deferredRetryReason = detectMalformedDSMLToolAttempt(outputText) ? 'malformed_tool_call' : 'empty_output';
           return false;
         }
         ended = true;
@@ -247,6 +267,16 @@ async function handleVercelStream(req, res, rawBody, payload) {
           res.end();
         }
         return true;
+      }
+      // A malformed tool-call attempt (corrupted DSML markup that parsed
+      // into no tool call) defers even when visible text exists: the model
+      // intended to call a tool, and a text-only terminal would end the
+      // caller's agent turn mid-task. The retry re-emits with the
+      // corrective suffix that teaches the exact DSML format.
+      if (detected.length === 0 && !toolCallsEmitted && options.deferEmpty && reason !== 'content_filter'
+        && detectMalformedDSMLToolAttempt(outputText)) {
+        deferredRetryReason = 'malformed_tool_call';
+        return false;
       }
       ended = true;
       sendFrame({
@@ -354,14 +384,17 @@ async function handleVercelStream(req, res, rawBody, payload) {
                   // outputText stays raw so tool detection at finish still
                   // sees tool calls that were wrapped inside an echo.
                   const visible = visibleCleaner.clean(trimmed);
-                  if (visible) {
-                    visibleOutputText += visible;
-                  }
                   if (!visible) {
                     continue;
                   }
                   if (!toolSieveEnabled) {
-                    deltaCoalescer.append('content', visible);
+                    // Strip leaked tool markup AFTER the (absent) sieve so
+                    // complete tool calls are never pre-stripped.
+                    const emitted = stripLeakedToolMarkup(visible);
+                    if (emitted) {
+                      visibleOutputText += emitted;
+                      deltaCoalescer.append('content', emitted);
+                    }
                     continue;
                   }
                   const events = processToolSieveChunk(toolSieveState, visible, toolNames);
@@ -388,7 +421,13 @@ async function handleVercelStream(req, res, rawBody, payload) {
                       continue;
                     }
                     if (evt.text) {
-                      deltaCoalescer.append('content', evt.text);
+                      // Strip leaked tool markup AFTER the sieve so complete
+                      // tool calls are still captured from the raw stream.
+                      const emitted = stripLeakedToolMarkup(evt.text);
+                      if (emitted) {
+                        visibleOutputText += emitted;
+                        deltaCoalescer.append('content', emitted);
+                      }
                     }
                   }
                 }
@@ -468,20 +507,26 @@ async function handleVercelStream(req, res, rawBody, payload) {
         return;
       }
       retryAttempts += 1;
+      const malformedRetry = deferredRetryReason === 'malformed_tool_call';
       console.info('[openai_empty_retry] attempting synthetic retry', {
         surface: 'chat.completions',
         stream: true,
         retry_attempt: retryAttempts,
+        retry_reason: deferredRetryReason || 'empty_output',
         parent_message_id: processed.responseMessageID || 0,
       });
-      usagePrompt = usagePromptWithEmptyOutputRetry(finalPrompt, retryAttempts);
+      usagePrompt = malformedRetry
+        ? usagePromptWithMalformedToolCallRetry(finalPrompt, retryAttempts)
+        : usagePromptWithEmptyOutputRetry(finalPrompt, retryAttempts);
       const retryPowHeader = await refreshPowHeader('retry');
       if (!retryPowHeader) {
         return;
       }
       completionRes = await fetchDeepSeekStream(
         DEEPSEEK_COMPLETION_URL,
-        clonePayloadForEmptyOutputRetry(completionPayload, processed.responseMessageID),
+        malformedRetry
+          ? clonePayloadForMalformedToolCallRetry(completionPayload, processed.responseMessageID)
+          : clonePayloadForEmptyOutputRetry(completionPayload, processed.responseMessageID),
         retryPowHeader,
       );
       if (completionRes === null) {
@@ -514,12 +559,31 @@ function clonePayloadForEmptyOutputRetry(payload, parentMessageID) {
   return clone;
 }
 
+function clonePayloadForMalformedToolCallRetry(payload, parentMessageID) {
+  const clone = {
+    ...(payload || {}),
+    prompt: appendMalformedToolCallRetrySuffix(asString(payload && payload.prompt)),
+  };
+  if (parentMessageID && parentMessageID > 0) {
+    clone.parent_message_id = parentMessageID;
+  }
+  return clone;
+}
+
 function appendEmptyOutputRetrySuffix(prompt) {
   const base = asString(prompt).trimEnd();
   if (!base) {
     return EMPTY_OUTPUT_RETRY_SUFFIX;
   }
   return `${base}\n\n${EMPTY_OUTPUT_RETRY_SUFFIX}`;
+}
+
+function appendMalformedToolCallRetrySuffix(prompt) {
+  const base = asString(prompt).trimEnd();
+  if (!base) {
+    return MALFORMED_TOOL_CALL_RETRY_SUFFIX;
+  }
+  return `${base}\n\n${MALFORMED_TOOL_CALL_RETRY_SUFFIX}`;
 }
 
 function usagePromptWithEmptyOutputRetry(originalPrompt, attempts) {
@@ -530,6 +594,19 @@ function usagePromptWithEmptyOutputRetry(originalPrompt, attempts) {
   let next = originalPrompt;
   for (let i = 0; i < attempts; i += 1) {
     next = appendEmptyOutputRetrySuffix(next);
+    parts.push(next);
+  }
+  return parts.join('\n');
+}
+
+function usagePromptWithMalformedToolCallRetry(originalPrompt, attempts) {
+  if (!attempts || attempts <= 0) {
+    return originalPrompt;
+  }
+  const parts = [originalPrompt];
+  let next = originalPrompt;
+  for (let i = 0; i < attempts; i += 1) {
+    next = appendMalformedToolCallRetrySuffix(next);
     parts.push(next);
   }
   return parts.join('\n');

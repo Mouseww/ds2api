@@ -915,3 +915,51 @@ test('trimContinuationOverlap preserves short normal tokens and trims long snaps
   const incoming = `${existing}继续分析`;
   assert.equal(trimContinuationOverlap(existing, incoming), '继续分析');
 });
+
+// Verbatim corrupted tool-call emission from a dead coding-agent transcript:
+// fullwidth doubled pipes, doubled parameter-name attribute, stray CDATA
+// close, no wrapper/invoke open tags. The sieve cannot capture it.
+const malformedSpecimen = 'Now let me check the normalizer.\n\n' +
+  '<｜｜DSML｜｜ parameter name="parameter name="pattern">func ShouldRetryEmptyOutput|func FinalizeTurn]]</｜｜DSML｜｜ parameter>\n' +
+  '</｜｜DSML｜｜ invoke>\n' +
+  '</｜｜DSML｜｜ calls>';
+
+const malformedRecovery = '<|DSML|tool_calls>\n' +
+  '<|DSML|invoke name="grep">\n' +
+  '<|DSML|parameter name="pattern"><![CDATA[func ShouldRetryEmptyOutput]]></|DSML|parameter>\n' +
+  '</|DSML|invoke>\n' +
+  '</|DSML|tool_calls>';
+
+test('vercel stream retries a malformed tool call with the corrective suffix', async () => {
+  const { frames, fetchURLs, fetchBodies } = await runMockVercelStreamSequence([
+    [`data: ${JSON.stringify({ p: 'response/content', v: malformedSpecimen })}\n\n`, 'data: [DONE]\n\n'],
+    [`data: ${JSON.stringify({ p: 'response/content', v: malformedRecovery })}\n\n`, 'data: [DONE]\n\n'],
+  ], { tool_names: ['grep'] });
+  const completionBodies = fetchBodies.filter((body) => Object.hasOwn(body, 'prompt'));
+  assert.equal(fetchURLs.filter((url) => url === 'https://chat.deepseek.com/api/v0/chat/completion').length, 2);
+  assert.match(completionBodies[1].prompt, /malformed tool call/);
+  assert.match(completionBodies[1].prompt, /<\|DSML\|tool_calls>/);
+  assert.doesNotMatch(completionBodies[1].prompt, /Previous reply had no visible output/);
+  const parsed = frames.filter((frame) => frame !== '[DONE]').map((frame) => JSON.parse(frame));
+  const toolFrame = parsed.find((p) => p.choices && p.choices[0].delta && p.choices[0].delta.tool_calls);
+  assert.ok(toolFrame, 'expected a structured tool_calls frame from the retry');
+  assert.equal(toolFrame.choices[0].delta.tool_calls[0].function.name, 'grep');
+  const allContent = parsed.map((p) => (p.choices && p.choices[0].delta && p.choices[0].delta.content) || '').join('');
+  assert.ok(!allContent.includes('DSML'), `corrupted markup leaked as visible content: ${allContent}`);
+});
+
+test('vercel stream returns sanitized text when the malformed retry also fails', async () => {
+  const { frames, fetchBodies } = await runMockVercelStreamSequence([
+    [`data: ${JSON.stringify({ p: 'response/content', v: malformedSpecimen })}\n\n`, 'data: [DONE]\n\n'],
+    [`data: ${JSON.stringify({ p: 'response/content', v: malformedSpecimen })}\n\n`, 'data: [DONE]\n\n'],
+  ], { tool_names: ['grep'] });
+  const completionBodies = fetchBodies.filter((body) => Object.hasOwn(body, 'prompt'));
+  assert.equal(completionBodies.length, 2);
+  assert.match(completionBodies[1].prompt, /malformed tool call/);
+  const parsed = frames.filter((frame) => frame !== '[DONE]').map((frame) => JSON.parse(frame));
+  const finish = parsed[parsed.length - 1];
+  assert.equal(finish.choices[0].finish_reason, 'stop');
+  const allContent = parsed.map((p) => (p.choices && p.choices[0].delta && p.choices[0].delta.content) || '').join('');
+  assert.ok(!allContent.includes('DSML'), `corrupted markup leaked as visible content: ${allContent}`);
+  assert.ok(allContent.includes('Now let me check the normalizer.'), `answer text lost: ${allContent}`);
+});

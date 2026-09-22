@@ -15,12 +15,10 @@ import (
 	"ds2api/internal/assistantturn"
 	"ds2api/internal/auth"
 	"ds2api/internal/completionruntime"
-	"ds2api/internal/config"
 	"ds2api/internal/httpapi/openai/history"
 	"ds2api/internal/httpapi/requestbody"
 	"ds2api/internal/promptcompat"
 	"ds2api/internal/responsehistory"
-	"ds2api/internal/sse"
 	"ds2api/internal/toolcall"
 	"ds2api/internal/translatorcliproxy"
 	"ds2api/internal/util"
@@ -327,28 +325,6 @@ func writeGeminiErrorFromOpenAI(w http.ResponseWriter, status int, raw []byte) {
 		message = http.StatusText(status)
 	}
 	writeGeminiError(w, status, message)
-}
-
-//nolint:unused // retained for native Gemini non-stream handling path.
-func (h *Handler) handleNonStreamGenerateContent(w http.ResponseWriter, resp *http.Response, model, finalPrompt string, thinkingEnabled bool, toolNames []string) {
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		if detail := completionruntime.TryDetectCaptchaFromBody(body); detail != "" {
-			config.Logger.Warn("[gemini_nonstream] captcha challenge detected on initial response", "detail", detail)
-		}
-		writeGeminiError(w, resp.StatusCode, strings.TrimSpace(string(body)))
-		return
-	}
-
-	result := sse.CollectStream(resp, thinkingEnabled, true)
-	writeJSON(w, http.StatusOK, buildGeminiGenerateContentResponse(
-		model,
-		finalPrompt,
-		cleanVisibleOutput(result.Thinking, false),
-		cleanVisibleOutput(result.Text, false),
-		toolNames,
-	))
 }
 
 //nolint:unused // retained for native Gemini non-stream handling path.

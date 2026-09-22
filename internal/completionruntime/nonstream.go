@@ -259,7 +259,13 @@ func ExecuteNonStreamStartedWithRetry(ctx context.Context, ds DeepSeekCaller, a 
 		if retryMax <= 0 {
 			retryMax = shared.EmptyOutputRetryMaxAttempts()
 		}
-		if !opts.RetryEnabled || !assistantturn.ShouldRetryEmptyOutput(turn, attempts, retryMax) {
+		// A malformed tool-call attempt (corrupted DSML markup that parsed
+		// into no tool call) retries with a corrective suffix that teaches
+		// the exact format, even when visible text exists: the model
+		// intended to call a tool, and a text-only response would end the
+		// caller's agent turn mid-task.
+		retryKind := assistantturn.RetryKindForTurn(turn, attempts, retryMax)
+		if !opts.RetryEnabled || retryKind == assistantturn.RetryKindNone {
 			if canRetryOnAlternateAccount(ctx, policy, turn.Error, opts.RetryEnabled, &accountSwitchAttempted) {
 				switched, switchErr := startStandardCompletionOnAlternateAccount(ctx, ds, a, stdReq, opts, maxAttempts)
 				if switchErr != nil {
@@ -282,18 +288,25 @@ func ExecuteNonStreamStartedWithRetry(ctx context.Context, ds DeepSeekCaller, a 
 		}
 
 		attempts++
-		config.Logger.Info("[completion_runtime_empty_retry] attempting synthetic retry", "surface", stdReq.Surface, "stream", false, "retry_attempt", attempts, "parent_message_id", turn.ResponseMessageID)
+		config.Logger.Info("[completion_runtime_empty_retry] attempting synthetic retry", "surface", stdReq.Surface, "stream", false, "retry_attempt", attempts, "retry_kind", retryKind.String(), "parent_message_id", turn.ResponseMessageID)
 		retryPow, powErr := ds.GetPow(ctx, a, maxAttempts)
 		if powErr != nil {
 			config.Logger.Warn("[completion_runtime_empty_retry] retry PoW fetch failed, falling back to original PoW", "surface", stdReq.Surface, "retry_attempt", attempts, "error", powErr)
 			retryPow = pow
 		}
 		retryPayload := shared.ClonePayloadForEmptyOutputRetry(payload, turn.ResponseMessageID)
+		if retryKind == assistantturn.RetryKindMalformedToolCall {
+			retryPayload = shared.ClonePayloadForMalformedToolCallRetry(payload, turn.ResponseMessageID)
+		}
 		nextResp, err := ds.CallCompletion(ctx, a, retryPayload, retryPow, maxAttempts)
 		if err != nil {
 			return NonStreamResult{SessionID: sessionID, Payload: payload, Turn: turn, Attempts: attempts}, &assistantturn.OutputError{Status: http.StatusInternalServerError, Message: "Failed to get completion.", Code: "error"}
 		}
-		usagePrompt = shared.UsagePromptWithEmptyOutputRetry(usagePrompt, attempts)
+		if retryKind == assistantturn.RetryKindMalformedToolCall {
+			usagePrompt = shared.UsagePromptWithMalformedToolCallRetry(stdReq.PromptTokenText, attempts)
+		} else {
+			usagePrompt = shared.UsagePromptWithEmptyOutputRetry(usagePrompt, attempts)
+		}
 		currentResp = nextResp
 	}
 }
