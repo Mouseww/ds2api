@@ -68,6 +68,7 @@
 
 1. **冷却检查**：每个账号维护「最近一次封禁复查时间」`lastBanRecheckAt`（进程内，非持久化）。若距上次复查不足 `ban_recheck_cooldown_seconds`（默认 **60** 秒），跳过本次复查，沿用现有错误处理路径（换账号/重试/返回错误）。
 2. **重新登录拉取封禁状态**：调用 `client.Login(ctx, A)`（复用现有 `LoginFunc`）。登录成功即会通过 `updateAccountBanStatus` 刷新 `ban_is_muted/ban_mute_until/ban_status`。
+   - 设备指纹风控自愈：登录被上游以 `RISK_DEVICE_DETECTED` 拒绝时（账号持久化的 `device_id` 已被风控标记），`client.Login` 内部会重新随机生成设备指纹、持久化并重试（至多轮换 2 次，重试间隔约 1 秒）。轮换耗尽仍失败才按普通登录失败处理；该重试对复查/刷新/切号流程透明，不额外触发封禁复查。
 3. **判定**：
    - 若登录成功且 `ban_is_muted == 1` → **自动禁用**账号 `A`（见 R3），并**立即补足池子**（见 R5），本次请求继续走现有「切换账号」路径。
    - 若登录成功但 `ban_is_muted != 1` → 账号未被封禁，仅更新封禁字段；按现有逻辑继续（token 已刷新，可继续重试当前账号）。

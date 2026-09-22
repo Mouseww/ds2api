@@ -10,18 +10,59 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 	"unicode"
 
 	"ds2api/internal/auth"
 	"ds2api/internal/config"
 )
 
+// loginDeviceRotationLimit bounds how many times Login regenerates the
+// account device fingerprint after DeepSeek risk control rejects it
+// (RISK_DEVICE_DETECTED). A flagged device_id poisons every later login for
+// the account, so the only recovery is a fresh random fingerprint.
+const loginDeviceRotationLimit = 2
+
+// loginDeviceRotationPause spaces out fingerprint-rotation retries so a
+// rejected login is not immediately followed by another one from the same
+// source. Tests zero it out.
+var loginDeviceRotationPause = time.Second
+
 func (c *Client) Login(ctx context.Context, acc config.Account) (string, error) {
-	deviceID, err := c.ensureAccountDeviceID(acc)
-	if err != nil {
-		return "", err
+	for rotation := 0; ; rotation++ {
+		deviceID, err := c.ensureAccountDeviceID(acc)
+		if err != nil {
+			return "", err
+		}
+		acc.DeviceID = deviceID
+		token, err := c.loginOnce(ctx, acc, deviceID)
+		if err == nil {
+			return token, nil
+		}
+		if rotation >= loginDeviceRotationLimit || !isRiskDeviceDetected(err) {
+			return "", err
+		}
+		newDeviceID, rotErr := c.rotateAccountDeviceID(acc)
+		if rotErr != nil {
+			return "", rotErr
+		}
+		acc.DeviceID = newDeviceID
+		config.Logger.Warn(
+			"[login] device fingerprint flagged by risk control, rotated and retrying",
+			"account", acc.Identifier(),
+			"attempt", rotation+1,
+			"old_error", err.Error(),
+		)
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(loginDeviceRotationPause):
+		}
 	}
-	acc.DeviceID = deviceID
+}
+
+// loginOnce performs a single login attempt with the given device fingerprint.
+func (c *Client) loginOnce(ctx context.Context, acc config.Account, deviceID string) (string, error) {
 	clients := c.requestClientsForAccount(acc)
 	payload := map[string]any{
 		"email":     "",
@@ -155,14 +196,38 @@ func (c *Client) ensureAccountDeviceID(acc config.Account) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if err := c.persistAccountDeviceID(acc, deviceID); err != nil {
+		return "", err
+	}
+	return deviceID, nil
+}
+
+// rotateAccountDeviceID replaces the account's persisted device fingerprint
+// with a fresh random one and returns it. Used when risk control has flagged
+// the previous fingerprint (RISK_DEVICE_DETECTED).
+func (c *Client) rotateAccountDeviceID(acc config.Account) (string, error) {
+	deviceID, err := createRandomDeviceID()
+	if err != nil {
+		return "", err
+	}
+	if err := c.persistAccountDeviceID(acc, deviceID); err != nil {
+		return "", err
+	}
+	return deviceID, nil
+}
+
+// persistAccountDeviceID stores deviceID on the account in the config store
+// so later logins reuse the same fingerprint. Without a store or an account
+// identity the value only applies to the current login.
+func (c *Client) persistAccountDeviceID(acc config.Account, deviceID string) error {
 	if c == nil || c.Store == nil {
-		return deviceID, nil
+		return nil
 	}
 	identifier := acc.Identifier()
 	if identifier == "" {
-		return deviceID, nil
+		return nil
 	}
-	if err := c.Store.Update(func(cfg *config.Config) error {
+	return c.Store.Update(func(cfg *config.Config) error {
 		for i := range cfg.Accounts {
 			if cfg.Accounts[i].Identifier() == identifier {
 				cfg.Accounts[i].DeviceID = deviceID
@@ -170,10 +235,15 @@ func (c *Client) ensureAccountDeviceID(acc config.Account) (string, error) {
 			}
 		}
 		return errors.New("account not found")
-	}); err != nil {
-		return "", err
-	}
-	return deviceID, nil
+	})
+}
+
+// isRiskDeviceDetected reports whether a login error is DeepSeek risk control
+// rejecting the device fingerprint (RISK_DEVICE_DETECTED). The flagged
+// device_id stays rejected for later logins, so Login responds by rotating
+// to a fresh random fingerprint.
+func isRiskDeviceDetected(err error) bool {
+	return err != nil && strings.Contains(strings.ToUpper(err.Error()), "RISK_DEVICE_DETECTED")
 }
 
 func createRandomDeviceID() (string, error) {
