@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -194,5 +195,58 @@ func TestLoginDoesNotRotateDeviceOnOrdinaryFailure(t *testing.T) {
 	stored, _ := client.Store.FindAccount("risk@test.com")
 	if stored.DeviceID != devices[0] {
 		t.Fatalf("persisted device_id=%q want %q (no rotation)", stored.DeviceID, devices[0])
+	}
+}
+
+func TestAccountTimezoneOffset_SameAccountStable(t *testing.T) {
+	a := accountTimezoneOffset("account-a")
+	b := accountTimezoneOffset("account-a")
+	if a != b {
+		t.Fatalf("same account should map to stable timezone, got %d then %d", a, b)
+	}
+}
+
+func TestAccountTimezoneOffset_DefaultForEmpty(t *testing.T) {
+	if got := accountTimezoneOffset(""); got != 28800 {
+		t.Fatalf("empty identifier should default to UTC+8, got %d", got)
+	}
+}
+
+func TestAccountTimezoneOffset_DifferentAccountsSpread(t *testing.T) {
+	seen := map[int]bool{}
+	same := 0
+	for i := 0; i < 100; i++ {
+		o := accountTimezoneOffset(fmt.Sprintf("acct-%d@test.com", i))
+		seen[o] = true
+		if i > 0 && o == accountTimezoneOffset("acct-0@test.com") {
+			same++
+		}
+	}
+	if len(seen) < 3 {
+		t.Fatalf("expected timezone spread across at least 3 offsets, got %d: %v", len(seen), seen)
+	}
+}
+
+func TestLoginHeaders_PerAccountTimezoneHeader(t *testing.T) {
+	acc1 := config.Account{Email: "a@test.com"}
+	acc2 := config.Account{Email: "zzz@other.com"}
+
+	h1 := loginHeaders(acc1)
+	h2 := loginHeaders(acc2)
+
+	tz1 := h1["x-client-timezone-offset"]
+	tz2 := h2["x-client-timezone-offset"]
+
+	if tz1 == "" || tz2 == "" {
+		t.Fatal("x-client-timezone-offset missing from login headers")
+	}
+
+	// The two accounts may or may not hash to the same offset; the point is
+	// that headers are well-formed and the timezone is some sensible integer.
+	for _, v := range []string{tz1, tz2} {
+		n, err := strconv.Atoi(v)
+		if err != nil || n == 0 {
+			t.Fatalf("timezone offset %q is not a valid non-zero integer", v)
+		}
 	}
 }

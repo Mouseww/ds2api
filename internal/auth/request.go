@@ -36,6 +36,12 @@ const (
 	banUnbanCheckInterval = 60 * time.Second
 )
 
+// banUnbanLoginPause spaces out the unban monitor's re-login attempts across
+// accounts. Without it a batch of expired bans becomes a login storm from one
+// source, which trips DeepSeek's rate limit (TOO_MANY_REQUESTS) and device
+// risk control (RISK_DEVICE_DETECTED). Tests zero it out.
+var banUnbanLoginPause = 10 * time.Second
+
 type RequestAuth struct {
 	UseConfigToken bool
 	DeepSeekToken  string
@@ -387,6 +393,7 @@ func (r *Resolver) checkExpiredBans(ctx context.Context) {
 		return
 	}
 	nowUnix := float64(time.Now().Unix())
+	paused := false
 	for _, acc := range r.Store.Accounts() {
 		if acc.IsEnabled() || acc.DisabledReason != "banned" {
 			continue
@@ -400,6 +407,15 @@ func (r *Resolver) checkExpiredBans(ctx context.Context) {
 		if acc.BanMuteUntil <= 0 || nowUnix < acc.BanMuteUntil {
 			continue // no known expiry, or not yet expired
 		}
+		// Space out re-login attempts so a batch of expired bans does not
+		// storm the login endpoint from a single source. The first account
+		// logs in immediately; later ones wait for the pause.
+		if paused {
+			if !sleepContext(ctx, banUnbanLoginPause) {
+				return
+			}
+		}
+		paused = true
 		// Mute has expired: re-login to refresh ban status. loginAndPersist
 		// will call reenableIfUnbanned if the ban was lifted.
 		a := &RequestAuth{
@@ -416,6 +432,22 @@ func (r *Resolver) checkExpiredBans(ctx context.Context) {
 				config.Logger.Warn("[ban_unban_monitor] re-check login failed", "account", acc.Identifier(), "error", err)
 			}
 		}
+	}
+}
+
+// sleepContext blocks for d or until ctx is cancelled, returning false on
+// cancellation. A zero or negative duration returns immediately (true).
+func sleepContext(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return true
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 

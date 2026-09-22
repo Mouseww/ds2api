@@ -219,6 +219,50 @@ func TestCheckExpiredBans_StillBannedAccount(t *testing.T) {
 	}
 }
 
+func TestCheckExpiredBans_PausesBetweenAccounts(t *testing.T) {
+	origPause := banUnbanLoginPause
+	banUnbanLoginPause = 500 * time.Millisecond
+	t.Cleanup(func() { banUnbanLoginPause = origPause })
+
+	t.Setenv("DS2API_CONFIG_JSON", `{
+		"keys":["managed-key"],
+		"accounts":[
+			{"email":"a1@ex.com","password":"pwd"},
+			{"email":"a2@ex.com","password":"pwd"},
+			{"email":"a3@ex.com","password":"pwd"}
+		]
+	}`)
+	store := config.LoadStore()
+	// All three accounts are banned with expired mute.
+	for _, id := range []string{"a1@ex.com", "a2@ex.com", "a3@ex.com"} {
+		if err := store.UpdateAccountBanStatus(id, 1, float64(time.Now().Add(-1*time.Hour).Unix()), 3); err != nil {
+			t.Fatalf("set ban status for %s: %v", id, err)
+		}
+		if err := store.SetAccountEnabled(id, false, "banned"); err != nil {
+			t.Fatalf("disable %s: %v", id, err)
+		}
+	}
+
+	var callOrder []string
+	resolver := NewResolver(store, account.NewPool(store), func(_ context.Context, acc config.Account) (string, error) {
+		callOrder = append(callOrder, acc.Identifier())
+		return "fresh-token", nil
+	})
+
+	start := time.Now()
+	resolver.checkExpiredBans(context.Background())
+	elapsed := time.Since(start)
+
+	if len(callOrder) != 3 {
+		t.Fatalf("expected 3 login calls, got %d: %v", len(callOrder), callOrder)
+	}
+
+	// Three accounts with 500ms pause between them = at least 1s (2 pauses).
+	if elapsed < time.Second {
+		t.Fatalf("expected spaced-out logins (~%v), got elapsed=%v", banUnbanLoginPause*2, elapsed)
+	}
+}
+
 func mustAccount(t *testing.T, store *config.Store, identifier string) config.Account {
 	t.Helper()
 	acc, ok := store.FindAccount(identifier)

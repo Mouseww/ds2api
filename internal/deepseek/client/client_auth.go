@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -61,6 +63,41 @@ func (c *Client) Login(ctx context.Context, acc config.Account) (string, error) 
 	}
 }
 
+// loginHeaders returns a copy of the shared BaseHeaders with a per-account
+// timezone offset so pooled accounts present distinct device characteristics
+// instead of all reporting the same UTC+8.
+func loginHeaders(acc config.Account) map[string]string {
+	headers := make(map[string]string, len(dsprotocol.BaseHeaders)+1)
+	for k, v := range dsprotocol.BaseHeaders {
+		headers[k] = v
+	}
+	headers["x-client-timezone-offset"] = strconv.Itoa(accountTimezoneOffset(acc.Identifier()))
+	return headers
+}
+
+// accountTimezoneOffset returns a stable timezone offset (in seconds) derived
+// from the account identifier hash. The same account always maps to the same
+// offset; different accounts spread across a small set of realistic values so
+// they are less likely to be recognized as clones of a single device.
+func accountTimezoneOffset(identifier string) int {
+	if identifier == "" {
+		return 28800 // UTC+8 default
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(identifier))
+	offsets := []int{
+		28800,  // UTC+8 Beijing
+		32400,  // UTC+9
+		36000,  // UTC+10
+		25200,  // UTC+7
+		-14400, // UTC-4
+		-18000, // UTC-5
+		-25200, // UTC-7
+		0,      // UTC
+	}
+	return offsets[int(h.Sum32())%len(offsets)]
+}
+
 // loginOnce performs a single login attempt with the given device fingerprint.
 func (c *Client) loginOnce(ctx context.Context, acc config.Account, deviceID string) (string, error) {
 	clients := c.requestClientsForAccount(acc)
@@ -81,7 +118,7 @@ func (c *Client) loginOnce(ctx context.Context, acc config.Account, deviceID str
 	} else {
 		return "", errors.New("missing email/mobile")
 	}
-	resp, err := c.postJSON(ctx, clients.regular, clients.fallback, dsprotocol.DeepSeekLoginURL, dsprotocol.BaseHeaders, payload)
+	resp, err := c.postJSON(ctx, clients.regular, clients.fallback, dsprotocol.DeepSeekLoginURL, loginHeaders(acc), payload)
 	if err != nil {
 		return "", err
 	}
