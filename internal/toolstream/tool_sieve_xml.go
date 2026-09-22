@@ -139,9 +139,23 @@ func shouldKeepBareInvokeCapture(captured string) bool {
 	}
 
 	if invokeCloseTag, ok := findFirstToolMarkupTagByNameFrom(captured, startEnd+1, "invoke", true); ok {
-		return strings.TrimSpace(captured[invokeCloseTag.End+1:]) == ""
+		trailing := captured[invokeCloseTag.End+1:]
+		if strings.TrimSpace(trailing) == "" {
+			return true
+		}
+		// A tag that has only partially arrived must keep the capture open:
+		// the closing wrapper normally follows the invoke close directly, and
+		// releasing here would emit half a tool call as visible text.
+		return findPartialXMLToolTagStart(strings.TrimLeft(trailing, " \t\r\n")) >= 0
 	}
 	if paramTag, ok := findFirstToolMarkupTagByName(body, 0, "parameter"); ok && strings.TrimSpace(body[:paramTag.Start]) == "" {
+		return true
+	}
+
+	// A tag that has only partially arrived must keep the capture open:
+	// releasing now would emit half a tool call as visible text. This is the
+	// streaming case where the network splits a tag across chunks.
+	if findPartialXMLToolTagStart(trimmedBody) >= 0 {
 		return true
 	}
 
@@ -149,6 +163,45 @@ func shouldKeepBareInvokeCapture(captured string) bool {
 	return strings.HasPrefix(trimmedLower, "<parameter") ||
 		strings.HasPrefix(trimmedLower, "{") ||
 		strings.HasPrefix(trimmedLower, "[")
+}
+
+// synthesizeToolCallClose builds the closing tag matching an unclosed
+// tool_calls wrapper, preserving the wrapper's own delimiter spelling
+// (<|DSML|tool_calls>, <｜｜DSML｜｜ calls>, <tool_calls>, ...).
+func synthesizeToolCallClose(captured string, open toolcall.ToolMarkupTag) string {
+	if open.Start < 0 || open.NameStart <= open.Start || open.NameStart > len(captured) {
+		return "</tool_calls>"
+	}
+	prefix := strings.TrimLeft(captured[open.Start:open.NameStart], "<＜")
+	return "</" + prefix + open.Name + ">"
+}
+
+// recoverUnclosedToolCapture retries parsing after implicitly closing a
+// tool_calls wrapper that never received its closing tag. At end of stream the
+// block is complete enough to execute; without this the whole block is
+// released as visible text and its arguments leak into the answer body.
+func recoverUnclosedToolCapture(captured string, toolNames []string) (prefix string, calls []toolcall.ParsedToolCall, suffix string, ok bool) {
+	open, found := findFirstToolMarkupTagByName(captured, 0, "tool_calls")
+	if !found {
+		return "", nil, "", false
+	}
+	if _, closed := toolcall.FindMatchingToolMarkupClose(captured, open); closed {
+		return "", nil, "", false
+	}
+	prefixPart, parsedCalls, suffixPart, ready := consumeXMLToolCapture(captured+synthesizeToolCallClose(captured, open), toolNames)
+	if !ready || len(parsedCalls) == 0 {
+		return "", nil, "", false
+	}
+	return prefixPart, parsedCalls, suffixPart, true
+}
+
+// recoverToolCaptureAtEndOfStream makes a final attempt to turn a still-open
+// capture into a real tool call before it is released as text.
+func recoverToolCaptureAtEndOfStream(captured string, toolNames []string) (prefix string, calls []toolcall.ParsedToolCall, suffix string, ok bool) {
+	if p, c, s, ready := consumeXMLToolCapture(captured, toolNames); ready && len(c) > 0 {
+		return p, c, s, true
+	}
+	return recoverUnclosedToolCapture(captured, toolNames)
 }
 
 func findPartialXMLToolTagStart(s string) int {

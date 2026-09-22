@@ -124,27 +124,20 @@ func Flush(state *State, toolNames []string) []Event {
 		} else {
 			content := state.capture.String()
 			if content != "" {
-				recovered := toolcall.SanitizeLooseCDATA(content)
-				if recovered != content {
-					if prefix, calls, suffix, recoveredReady := consumeXMLToolCapture(recovered, toolNames); recoveredReady && len(calls) > 0 {
-						if prefix != "" {
-							state.noteText(prefix)
-							events = append(events, Event{Content: prefix})
-						}
-						events = append(events, Event{ToolCalls: calls})
-						if suffix != "" {
-							state.noteText(suffix)
-							events = append(events, Event{Content: suffix})
-						}
-					} else {
-						// If capture never resolved into a real tool call, release
-						// the buffered text instead of swallowing it.
-						state.noteText(content)
-						events = append(events, Event{Content: content})
+				recovered := toolcall.RepairDoubledParameterName(toolcall.SanitizeLooseCDATA(content))
+				if prefix, calls, suffix, ok := recoverToolCaptureAtEndOfStream(recovered, toolNames); ok {
+					if prefix != "" {
+						state.noteText(prefix)
+						events = append(events, Event{Content: prefix})
+					}
+					events = append(events, Event{ToolCalls: calls})
+					if suffix != "" {
+						state.noteText(suffix)
+						events = append(events, Event{Content: suffix})
 					}
 				} else {
-					// If capture never resolved into a real tool call, release the
-					// buffered text instead of swallowing it.
+					// If capture never resolved into a real tool call, release
+					// the buffered text instead of swallowing it.
 					state.noteText(content)
 					events = append(events, Event{Content: content})
 				}
@@ -302,7 +295,7 @@ func includeDuplicateLeadingLessThan(s string, idx int) int {
 }
 
 func consumeToolCapture(state *State, toolNames []string) (prefix string, calls []toolcall.ParsedToolCall, suffix string, ready bool) {
-	captured := state.capture.String()
+	captured := toolcall.RepairDoubledParameterName(state.capture.String())
 	if captured == "" {
 		return "", nil, "", false
 	}

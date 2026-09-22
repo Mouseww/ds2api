@@ -136,6 +136,22 @@ func parseJSONLiteralValue(raw string) (any, bool) {
 	return parsed, true
 }
 
+// doubledParameterNamePattern collapses the doubled parameter-name attribute
+// that corrupted DSML emissions repeat (parameter name="parameter name="...).
+// The doubled quote breaks quote-aware tag scanning, so the text is collapsed
+// before any tag scan or parse.
+var doubledParameterNamePattern = regexp.MustCompile(`(?i)(parameter\s+name=")+`)
+
+// RepairDoubledParameterName collapses repeated parameter-name attributes so
+// quote-aware tag scanning and parsing can proceed. The streaming sieve and
+// the visible-output sanitizer share this one repair.
+func RepairDoubledParameterName(text string) string {
+	if text == "" || !strings.Contains(strings.ToLower(text), "parameter") {
+		return text
+	}
+	return doubledParameterNamePattern.ReplaceAllString(text, `parameter name="`)
+}
+
 // SanitizeLooseCDATA repairs malformed trailing CDATA openings just enough for
 // final parsing and flush-time recovery. Properly closed CDATA blocks are left
 // untouched; an unclosed opener is stripped so the remaining text can still be
