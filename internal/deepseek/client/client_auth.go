@@ -4,7 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	dsprotocol "ds2api/internal/deepseek/protocol"
-	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -284,11 +284,14 @@ func isRiskDeviceDetected(err error) bool {
 }
 
 func createRandomDeviceID() (string, error) {
-	buf := make([]byte, 64)
+	buf := make([]byte, 16)
 	if _, err := rand.Read(buf); err != nil {
 		return "", err
 	}
-	return "B" + base64.StdEncoding.EncodeToString(buf), nil
+	// 32-char hex, matching the browser-fingerprint style device_id the
+	// DeepSeek web client sends. The legacy Android-format "B"+base64 value
+	// is rejected by risk control for web-platform logins.
+	return hex.EncodeToString(buf), nil
 }
 
 func (c *Client) reportClientSettingsAfterLogin(ctx context.Context, a *auth.RequestAuth, ssoID string) {
