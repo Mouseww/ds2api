@@ -59,6 +59,9 @@ func (c Config) MarshalJSON() ([]byte, error) {
 	if c.VercelSyncTime != 0 {
 		m["_vercel_sync_time"] = c.VercelSyncTime
 	}
+	if strings.TrimSpace(c.LoginServiceURL) != "" {
+		m["login_service_url"] = c.LoginServiceURL
+	}
 	return json.Marshal(m)
 }
 
@@ -142,6 +145,10 @@ func (c *Config) UnmarshalJSON(b []byte) error {
 			if err := json.Unmarshal(v, &c.VercelSyncTime); err != nil {
 				return fmt.Errorf("invalid field %q: %w", k, err)
 			}
+		case "login_service_url":
+			if err := json.Unmarshal(v, &c.LoginServiceURL); err != nil {
+				return fmt.Errorf("invalid field %q: %w", k, err)
+			}
 		default:
 			var anyVal any
 			if err := json.Unmarshal(v, &anyVal); err == nil {
@@ -174,6 +181,7 @@ func (c Config) Clone() Config {
 			Prompt:  c.ThinkingInjection.Prompt,
 		},
 		Vercel:           c.Vercel,
+		LoginServiceURL:  c.LoginServiceURL,
 		VercelSyncHash:   c.VercelSyncHash,
 		VercelSyncTime:   c.VercelSyncTime,
 		AdditionalFields: map[string]any{},

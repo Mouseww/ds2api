@@ -91,3 +91,23 @@ func TestLoginServiceURLUnconfigured(t *testing.T) {
 		t.Fatalf("expected empty login service URL, got %q", url)
 	}
 }
+
+func TestLoginServiceURLAddsScheme(t *testing.T) {
+	t.Setenv("DS2API_CONFIG_JSON", `{"keys":["k"],"accounts":[],"login_service_url":"dslogin.example.com:8787"}`)
+	store := config.LoadStore()
+	c := &Client{Store: store}
+	url := c.loginServiceURL()
+	if url != "http://dslogin.example.com:8787" {
+		t.Fatalf("expected http:// scheme added, got %q", url)
+	}
+}
+
+func TestLoginServiceURLKeepsScheme(t *testing.T) {
+	t.Setenv("DS2API_CONFIG_JSON", `{"keys":["k"],"accounts":[],"login_service_url":"https://dslogin.example.com:8787"}`)
+	store := config.LoadStore()
+	c := &Client{Store: store}
+	url := c.loginServiceURL()
+	if url != "https://dslogin.example.com:8787" {
+		t.Fatalf("expected https:// scheme preserved, got %q", url)
+	}
+}

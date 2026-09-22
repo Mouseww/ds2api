@@ -85,12 +85,20 @@ func (c *Client) Login(ctx context.Context, acc config.Account) (string, error) 
 }
 
 // loginServiceURL returns the configured browser-based login service base URL
-// (e.g. "http://127.0.0.1:8787"), or "" when not configured.
+// (e.g. "http://127.0.0.1:8787"), or "" when not configured. If the configured
+// value is missing a scheme it defaults to "http://".
 func (c *Client) loginServiceURL() string {
 	if c == nil || c.Store == nil {
 		return ""
 	}
-	return c.Store.Snapshot().LoginServiceURL
+	url := strings.TrimSpace(c.Store.Snapshot().LoginServiceURL)
+	if url == "" {
+		return ""
+	}
+	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+		url = "http://" + url
+	}
+	return url
 }
 
 // loginWithService delegates the WAF-protected login to a browser-based login
