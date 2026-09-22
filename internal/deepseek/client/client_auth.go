@@ -4,7 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	dsprotocol "ds2api/internal/deepseek/protocol"
-	"encoding/hex"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,6 +31,13 @@ const loginDeviceRotationLimit = 2
 var loginDeviceRotationPause = time.Second
 
 func (c *Client) Login(ctx context.Context, acc config.Account) (string, error) {
+	// The x-device-id header needs a stable per-account UUID, generated once
+	// and persisted alongside the body-level device_id.
+	deviceUUID, err := c.ensureAccountDeviceUUID(acc)
+	if err != nil {
+		return "", err
+	}
+	acc.DeviceUUID = deviceUUID
 	for rotation := 0; ; rotation++ {
 		deviceID, err := c.ensureAccountDeviceID(acc)
 		if err != nil {
@@ -63,15 +70,18 @@ func (c *Client) Login(ctx context.Context, acc config.Account) (string, error) 
 	}
 }
 
-// loginHeaders returns a copy of the shared BaseHeaders with a per-account
-// timezone offset so pooled accounts present distinct device characteristics
-// instead of all reporting the same UTC+8.
+// loginHeaders returns a copy of the shared BaseHeaders with per-account
+// device characteristics: the x-device-id UUID and a timezone offset derived
+// from the account identifier.
 func loginHeaders(acc config.Account) map[string]string {
-	headers := make(map[string]string, len(dsprotocol.BaseHeaders)+1)
+	headers := make(map[string]string, len(dsprotocol.BaseHeaders)+2)
 	for k, v := range dsprotocol.BaseHeaders {
 		headers[k] = v
 	}
 	headers["x-client-timezone-offset"] = strconv.Itoa(accountTimezoneOffset(acc.Identifier()))
+	if uuid := strings.TrimSpace(acc.DeviceUUID); uuid != "" {
+		headers["x-device-id"] = uuid
+	}
 	return headers
 }
 
@@ -253,10 +263,10 @@ func (c *Client) rotateAccountDeviceID(acc config.Account) (string, error) {
 	return deviceID, nil
 }
 
-// persistAccountDeviceID stores deviceID on the account in the config store
-// so later logins reuse the same fingerprint. Without a store or an account
-// identity the value only applies to the current login.
-func (c *Client) persistAccountDeviceID(acc config.Account, deviceID string) error {
+// persistAccountField writes a field on the account identified by
+// acc.Identifier() through the config store. Without a store or account
+// identity the call is a no-op.
+func (c *Client) persistAccountField(acc config.Account, set func(*config.Account)) error {
 	if c == nil || c.Store == nil {
 		return nil
 	}
@@ -267,12 +277,53 @@ func (c *Client) persistAccountDeviceID(acc config.Account, deviceID string) err
 	return c.Store.Update(func(cfg *config.Config) error {
 		for i := range cfg.Accounts {
 			if cfg.Accounts[i].Identifier() == identifier {
-				cfg.Accounts[i].DeviceID = deviceID
+				set(&cfg.Accounts[i])
 				return nil
 			}
 		}
 		return errors.New("account not found")
 	})
+}
+
+// persistAccountDeviceID stores deviceID on the account so later logins reuse
+// the same body-level device fingerprint.
+func (c *Client) persistAccountDeviceID(acc config.Account, deviceID string) error {
+	return c.persistAccountField(acc, func(a *config.Account) { a.DeviceID = deviceID })
+}
+
+// persistAccountDeviceUUID stores the UUID on the account so later logins
+// reuse the same x-device-id header value.
+func (c *Client) persistAccountDeviceUUID(acc config.Account, uuid string) error {
+	return c.persistAccountField(acc, func(a *config.Account) { a.DeviceUUID = uuid })
+}
+
+// ensureAccountDeviceUUID returns the account's existing DeviceUUID or
+// generates and persists a new random UUID v4.
+func (c *Client) ensureAccountDeviceUUID(acc config.Account) (string, error) {
+	uuid := strings.TrimSpace(acc.DeviceUUID)
+	if uuid != "" {
+		return uuid, nil
+	}
+	var err error
+	uuid, err = createRandomDeviceUUID()
+	if err != nil {
+		return "", err
+	}
+	if err := c.persistAccountDeviceUUID(acc, uuid); err != nil {
+		return "", err
+	}
+	return uuid, nil
+}
+
+// createRandomDeviceUUID generates a random UUID v4 string.
+func createRandomDeviceUUID() (string, error) {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	buf[6] = (buf[6] & 0x0f) | 0x40 // version 4
+	buf[8] = (buf[8] & 0x3f) | 0x80 // variant 10
+	return fmt.Sprintf("%x-%x-%x-%x-%x", buf[0:4], buf[4:6], buf[6:8], buf[8:10], buf[10:16]), nil
 }
 
 // isRiskDeviceDetected reports whether a login error is DeepSeek risk control
@@ -284,14 +335,11 @@ func isRiskDeviceDetected(err error) bool {
 }
 
 func createRandomDeviceID() (string, error) {
-	buf := make([]byte, 16)
+	buf := make([]byte, 64)
 	if _, err := rand.Read(buf); err != nil {
 		return "", err
 	}
-	// 32-char hex, matching the browser-fingerprint style device_id the
-	// DeepSeek web client sends. The legacy Android-format "B"+base64 value
-	// is rejected by risk control for web-platform logins.
-	return hex.EncodeToString(buf), nil
+	return "B" + base64.StdEncoding.EncodeToString(buf), nil
 }
 
 func (c *Client) reportClientSettingsAfterLogin(ctx context.Context, a *auth.RequestAuth, ssoID string) {

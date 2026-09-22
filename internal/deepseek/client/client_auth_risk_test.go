@@ -250,3 +250,26 @@ func TestLoginHeaders_PerAccountTimezoneHeader(t *testing.T) {
 		}
 	}
 }
+
+func TestCreateRandomDeviceUUID_V4Format(t *testing.T) {
+	id, err := createRandomDeviceUUID()
+	if err != nil {
+		t.Fatalf("createRandomDeviceUUID failed: %v", err)
+	}
+	parts := strings.Split(id, "-")
+	if len(parts) != 5 || len(parts[0]) != 8 || len(parts[1]) != 4 || len(parts[2]) != 4 || len(parts[3]) != 4 || len(parts[4]) != 12 {
+		t.Fatalf("expected UUID v4 format, got %q", id)
+	}
+	// Third group must start with '4' (version 4).
+	if parts[2][0] != '4' {
+		t.Fatalf("expected version 4 UUID, got %q", id)
+	}
+}
+
+func TestLoginHeaders_IncludesDeviceUUID(t *testing.T) {
+	acc := config.Account{Email: "a@test.com", DeviceUUID: "6b0df0aa-f885-4a8f-afff-56e8660d2060"}
+	h := loginHeaders(acc)
+	if h["x-device-id"] != "6b0df0aa-f885-4a8f-afff-56e8660d2060" {
+		t.Fatalf("expected x-device-id header from account UUID, got %q", h["x-device-id"])
+	}
+}

@@ -110,9 +110,8 @@ func TestCreateRandomDeviceID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("createRandomDeviceID failed: %v", err)
 	}
-	// Web-format device_id: 32-char hex (16 bytes).
-	if len(id1) != 32 {
-		t.Fatalf("expected 32-char hex device id, got len=%d %q", len(id1), id1)
+	if len(id1) < 2 || id1[0] != 'B' {
+		t.Fatalf("expected device id to start with B, got %q", id1)
 	}
 	id2, err := createRandomDeviceID()
 	if err != nil {

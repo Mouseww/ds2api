@@ -27,14 +27,15 @@ type Config struct {
 }
 
 type Account struct {
-	Name     string `json:"name,omitempty"`
-	Remark   string `json:"remark,omitempty"`
-	Email    string `json:"email,omitempty"`
-	Mobile   string `json:"mobile,omitempty"`
-	Password string `json:"password,omitempty"`
-	Token    string `json:"token,omitempty"`
-	DeviceID string `json:"device_id,omitempty"`
-	ProxyID  string `json:"proxy_id,omitempty"`
+	Name       string `json:"name,omitempty"`
+	Remark     string `json:"remark,omitempty"`
+	Email      string `json:"email,omitempty"`
+	Mobile     string `json:"mobile,omitempty"`
+	Password   string `json:"password,omitempty"`
+	Token      string `json:"token,omitempty"`
+	DeviceID   string `json:"device_id,omitempty"`
+	DeviceUUID string `json:"device_uuid,omitempty"`
+	ProxyID    string `json:"proxy_id,omitempty"`
 	// Enabled controls whether the account may be allocated by the load pool.
 	// A nil pointer means "enabled" for backward compatibility with older configs.
 	Enabled *bool `json:"enabled,omitempty"`
@@ -120,6 +121,7 @@ func (c *Config) NormalizeCredentials() {
 		c.Accounts[i].Name = strings.TrimSpace(c.Accounts[i].Name)
 		c.Accounts[i].Remark = strings.TrimSpace(c.Accounts[i].Remark)
 		c.Accounts[i].DeviceID = strings.TrimSpace(c.Accounts[i].DeviceID)
+		c.Accounts[i].DeviceUUID = strings.TrimSpace(c.Accounts[i].DeviceUUID)
 	}
 
 	c.Vercel = NormalizeVercelConfig(c.Vercel)

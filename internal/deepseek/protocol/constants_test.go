@@ -20,7 +20,7 @@ func TestSharedConstantsLoaded(t *testing.T) {
 	if _, ok := BaseHeaders["accept-charset"]; ok {
 		t.Fatal("unexpected accept-charset header present")
 	}
-	for _, h := range []string{"sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform", "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "Referer", "Origin", "accept-language", "accept-encoding", "accept-charset"} {
+	for _, h := range []string{"sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform", "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "Referer", "accept-language", "accept-encoding", "accept-charset"} {
 		if _, ok := BaseHeaders[h]; ok {
 			t.Fatalf("unexpected browser header present: %s", h)
 		}

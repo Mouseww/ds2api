@@ -28,6 +28,7 @@ var defaultStaticBaseHeaders = map[string]string{
 	"Host":                     "chat.deepseek.com",
 	"Accept":                   "application/json",
 	"Content-Type":             "application/json",
+	"Origin":                   "https://chat.deepseek.com",
 	"x-client-bundle-id":       "com.deepseek.chat",
 	"x-client-timezone-offset": "28800",
 }
