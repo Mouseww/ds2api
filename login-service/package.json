@@ -1,0 +1,15 @@
+{
+  "name": "ds2api-login-service",
+  "version": "1.0.0",
+  "description": "Browser-based DeepSeek login service: performs the native form login in headless Chromium to pass the AWS WAF challenge, and returns the session token.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "playwright": "^1.57.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -21,6 +21,7 @@ type Config struct {
 	CurrentInputFile  CurrentInputFileConfig  `json:"current_input_file,omitempty"`
 	ThinkingInjection ThinkingInjectionConfig `json:"thinking_injection,omitempty"`
 	Vercel            VercelConfig            `json:"vercel,omitempty"`
+	LoginServiceURL   string                  `json:"login_service_url,omitempty"`
 	VercelSyncHash    string                  `json:"_vercel_sync_hash,omitempty"`
 	VercelSyncTime    int64                   `json:"_vercel_sync_time,omitempty"`
 	AdditionalFields  map[string]any          `json:"-"`
@@ -125,6 +126,7 @@ func (c *Config) NormalizeCredentials() {
 	}
 
 	c.Vercel = NormalizeVercelConfig(c.Vercel)
+	c.LoginServiceURL = strings.TrimSpace(c.LoginServiceURL)
 	c.normalizeModelAliases()
 }
 

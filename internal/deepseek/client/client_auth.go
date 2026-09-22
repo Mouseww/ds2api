@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	dsprotocol "ds2api/internal/deepseek/protocol"
@@ -9,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -30,7 +32,19 @@ const loginDeviceRotationLimit = 2
 // source. Tests zero it out.
 var loginDeviceRotationPause = time.Second
 
+// loginServiceHTTPClient is the HTTP client used to call the browser-based
+// login service for accounts whose login endpoint is protected by AWS WAF.
+var loginServiceHTTPClient = &http.Client{Timeout: 35 * time.Second}
+
 func (c *Client) Login(ctx context.Context, acc config.Account) (string, error) {
+	// If a browser-based login service URL is configured, delegate the
+	// WAF-protected login to it. The service performs a native form
+	// submission in headless Chromium, which passes the AWS WAF challenge
+	// that plain HTTP / fetch() requests cannot.
+	if url := c.loginServiceURL(); url != "" {
+		return c.loginWithService(ctx, url, acc)
+	}
+
 	// The x-device-id header needs a stable per-account UUID, generated once
 	// and persisted alongside the body-level device_id.
 	deviceUUID, err := c.ensureAccountDeviceUUID(acc)
@@ -68,6 +82,69 @@ func (c *Client) Login(ctx context.Context, acc config.Account) (string, error) 
 		case <-time.After(loginDeviceRotationPause):
 		}
 	}
+}
+
+// loginServiceURL returns the configured browser-based login service base URL
+// (e.g. "http://127.0.0.1:8787"), or "" when not configured.
+func (c *Client) loginServiceURL() string {
+	if c == nil || c.Store == nil {
+		return ""
+	}
+	return c.Store.Snapshot().LoginServiceURL
+}
+
+// loginWithService delegates the WAF-protected login to a browser-based login
+// service. The service performs a native form submission in headless Chromium
+// and returns the session token.
+func (c *Client) loginWithService(ctx context.Context, serviceURL string, acc config.Account) (string, error) {
+	payload := map[string]string{}
+	if email := strings.TrimSpace(acc.Email); email != "" {
+		payload["email"] = email
+	} else if mobile := strings.TrimSpace(acc.Mobile); mobile != "" {
+		payload["mobile"] = mobile
+	} else {
+		return "", errors.New("missing email/mobile")
+	}
+	payload["password"] = strings.TrimSpace(acc.Password)
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, serviceURL+"/login", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := loginServiceHTTPClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("login service unreachable: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("login service read error: %w", err)
+	}
+
+	var result struct {
+		Success bool   `json:"success"`
+		Token   string `json:"token"`
+		Error   string `json:"error"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", fmt.Errorf("login service bad response: %w", err)
+	}
+	if !result.Success || result.Token == "" {
+		msg := result.Error
+		if msg == "" {
+			msg = "unknown error"
+		}
+		return "", fmt.Errorf("login service: %s", msg)
+	}
+	return result.Token, nil
 }
 
 // loginHeaders returns a copy of the shared BaseHeaders with per-account

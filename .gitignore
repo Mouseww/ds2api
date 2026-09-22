@@ -74,3 +74,5 @@ CLAUDE.local.md
 data/
 .codex
 .roomodes
+
+login-service/node_modules/
