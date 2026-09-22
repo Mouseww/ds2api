@@ -9,6 +9,8 @@ COPY package.json ./
 RUN npm install --omit=dev
 
 COPY index.js ./
+COPY entrypoint.sh ./
+RUN chmod +x entrypoint.sh
 
 ENV LOGIN_SERVICE_HOST=0.0.0.0
 ENV LOGIN_SERVICE_PORT=8787
@@ -16,5 +18,5 @@ ENV LOGIN_SERVICE_PORT=8787
 EXPOSE 8787
 
 # Headed Chromium (needed to pass CloudFront/WAF) runs under a virtual
-# display. The mcr.microsoft.com/playwright image ships xvfb-run for this.
-CMD ["xvfb-run", "-a", "node", "index.js"]
+# display. entrypoint.sh starts Xvfb manually (xvfb-run hangs on this image).
+CMD ["/app/entrypoint.sh"]

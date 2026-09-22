@@ -70,6 +70,28 @@ function sendJSON(res, status, obj) {
 //   - password input:    <input type="password" placeholder="请输入密码">
 //   - submit "button":   <DIV role="button" class="ds-button--primary">登录</DIV>
 
+async function clickPasswordLoginToggle(page) {
+  // The sign-in page defaults to phone + verification-code login. Switch to
+  // the email/password form by clicking the "密码登录" toggle link.
+  const selectors = [
+    'div.ds-sign-in-form__social-link:has-text("密码登录")',
+    '[role="button"]:has-text("密码登录")',
+    'text="密码登录"',
+  ];
+  for (const sel of selectors) {
+    try {
+      const loc = page.locator(sel).first();
+      await loc.waitFor({ state: 'visible', timeout: 8000 });
+      await loc.click();
+      // Confirm the password form replaced the verification-code form.
+      const pw = page.locator('input[type="password"]').first();
+      await pw.waitFor({ state: 'visible', timeout: 8000 });
+      return true;
+    } catch (_) { /* try next selector */ }
+  }
+  return false;
+}
+
 async function fillCredentialField(page, email, mobile) {
   // DeepSeek uses a single unified input for both email and phone. Wait for
   // it to appear (WAF challenge + SPA render can take several seconds).
@@ -88,26 +110,23 @@ async function fillCredentialField(page, email, mobile) {
 
 async function fillPasswordField(page, password) {
   const loc = page.locator('input[type="password"]').first();
-  if ((await loc.count()) > 0 && (await loc.isVisible())) {
+  try {
+    await loc.waitFor({ state: 'visible', timeout: 15000 });
     await loc.fill(password);
     return true;
-  }
-  return false;
+  } catch (_) { return false; }
 }
 
 async function clickSubmitButton(page) {
   const loc = page.getByRole('button', { name: /登录|Log in/i }).first();
-  if ((await loc.count()) > 0 && (await loc.isVisible())) {
+  try {
+    await loc.waitFor({ state: 'visible', timeout: 15000 });
     await loc.click();
     return true;
-  }
-  return false;
+  } catch (_) { return false; }
 }
 
 async function performLogin(email, mobile, password) {
-  // Headless Chromium is detected and blocked by CloudFront/WAF ("The
-  // request could not be satisfied"), so default to headed mode with
-  // anti-detection flags. On a headless server run under xvfb-run.
   const headless = process.env.LOGIN_HEADLESS === '1' || process.env.LOGIN_HEADLESS === 'true';
   const browser = await chromium.launch({
     headless,
@@ -154,10 +173,11 @@ async function performLogin(email, mobile, password) {
     });
 
     await page.goto(SIGN_IN_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    // Give the AWS WAF challenge and the Shumei fingerprint JS time to run.
     await page.waitForTimeout(SETTLE_MS);
 
-    // Fill the credential field.
+    // Switch to password login if the default is phone + verification code.
+    await clickPasswordLoginToggle(page);
+
     const filled = await fillCredentialField(page, email, mobile);
     if (!filled) {
       await page.screenshot({ path: '/tmp/login-debug.png', fullPage: true }).catch(() => {});
@@ -167,7 +187,9 @@ async function performLogin(email, mobile, password) {
     }
 
     if (!(await fillPasswordField(page, password))) {
-      throw new Error('login form not found (password input missing)');
+      await page.screenshot({ path: '/tmp/login-debug-pw.png', fullPage: true }).catch(() => {});
+      const inputs = await page.evaluate(() => Array.from(document.querySelectorAll('input')).map(i => ({ type: i.type, placeholder: i.placeholder, visible: i.offsetParent !== null }))).catch(() => []);
+      throw new Error('password input missing; inputs=' + JSON.stringify(inputs));
     }
 
     if (!(await clickSubmitButton(page))) {
