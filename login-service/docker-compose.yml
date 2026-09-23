@@ -5,8 +5,10 @@ services:
     restart: always
     ports:
       - "8787:8787"
-    # Chromium spawns many processes; without these ulimits the container hits
-    # "fork: Resource temporarily unavailable (11)" and login fails.
+    # Chromium spawns many processes; without these limits the container hits
+    # "spawn EAGAIN" / "fork: Resource temporarily unavailable (11)".
+    pids_limit: 65535
+    shm_size: "1gb"
     ulimits:
       nproc: 65535
       nofile: 65535

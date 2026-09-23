@@ -31,8 +31,9 @@ LOGIN_HEADLESS=1 npm start
 cd login-service
 docker build -t ds2api-login-service .
 
-# 直接 docker run（注意 ulimit，Chromium 进程多）
+# 直接 docker run（注意 ulimit + pids-limit + shm，Chromium 进程多）
 docker run -d --name login-service --restart=always \
+  --pids-limit 65535 --shm-size 1g \
   --ulimit nproc=65535:65535 --ulimit nofile=65535:65535 \
   -p 8787:8787 ds2api-login-service
 
@@ -42,7 +43,7 @@ docker compose up -d
 
 `mcr.microsoft.com/playwright` 镜像自带 xvfb-run，CMD 会以 `xvfb-run -a node index.js` 启动，在虚拟显示上跑有头 Chromium。已确认能通过 CloudFront WAF + AWS WAF challenge。
 
-> **fork: Resource temporarily unavailable？** Chromium 启动时会 fork 大量子进程，默认容器 ulimit 不够。加 `--ulimit nproc=65535` 解决。
+> **spawn EAGAIN / fork: Resource temporarily unavailable？** Chromium 启动时会 fork 大量子进程，默认容器 cgroup `pids.max`（4096）和 ulimit 都不够。加 `--pids-limit 65535 --shm-size 1g --ulimit nproc=65535` 解决。
 
 > **为什么不能 headless？** CloudFront Bot Control 会检测无头 Chromium，直接返回 `ERROR: The request could not be satisfied`。有头模式（配合反检测参数 `--disable-blink-features=AutomationControlled` + 隐藏 `navigator.webdriver`）才能通过。
 
