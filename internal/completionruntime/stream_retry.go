@@ -60,6 +60,7 @@ func ExecuteStreamWithRetry(ctx context.Context, ds DeepSeekCaller, a *auth.Requ
 
 	attempts := 0
 	accountSwitchAttempted := false
+	upstreamUnavailableAttempted := false
 	// The stream retry loop owns its own request-scoped failure policy: the
 	// auth-layer guard already makes a second switch impossible even if the
 	// start phase switched before, and a fresh policy lets the 429 re-check
@@ -104,6 +105,32 @@ func ExecuteStreamWithRetry(ctx context.Context, ds DeepSeekCaller, a *auth.Requ
 						hooks.OnRetryPrompt(opts.UsagePrompt)
 					}
 					continue
+				}
+			}
+			if opts.RetryEnabled && !upstreamUnavailableAttempted && a != nil && a.UseConfigToken {
+				upstreamUnavailableAttempted = true
+				switch policy.HandleUpstreamUnavailable(ctx) {
+				case FailureActionRetrySameAccount, FailureActionSwitchedAccount:
+					switched, switchErr := startPayloadCompletionOnAlternateAccount(ctx, ds, a, payload, opts, maxAttempts)
+					if switchErr != nil {
+						if hooks.OnRetryFailure != nil {
+							hooks.OnRetryFailure(switchErr.Status, switchErr.Message, switchErr.Code)
+						}
+						return
+					}
+					if switched.Response != nil {
+						config.Logger.Info("[completion_runtime_upstream_unavailable_retry] retrying after upstream unavailable", "surface", surface, "stream", opts.Stream, "account", a.AccountID)
+						currentResp = switched.Response
+						currentPayload = switched.Payload
+						pow = switched.Pow
+						if hooks.OnAccountSwitch != nil {
+							hooks.OnAccountSwitch(switched.SessionID)
+						}
+						if hooks.OnRetryPrompt != nil {
+							hooks.OnRetryPrompt(opts.UsagePrompt)
+						}
+						continue
+					}
 				}
 			}
 			if hooks.Finalize != nil {

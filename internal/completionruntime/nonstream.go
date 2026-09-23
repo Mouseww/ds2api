@@ -212,6 +212,7 @@ func ExecuteNonStreamStartedWithRetry(ctx context.Context, ds DeepSeekCaller, a 
 
 	attempts := 0
 	accountSwitchAttempted := false
+	upstreamUnavailableAttempted := false
 	currentResp := start.Response
 	usagePrompt := stdReq.PromptTokenText
 	accumulatedThinking := ""
@@ -284,6 +285,24 @@ func ExecuteNonStreamStartedWithRetry(ctx context.Context, ds DeepSeekCaller, a 
 					continue
 				}
 			}
+			if canRetryOnUpstreamUnavailable(ctx, policy, turn.Error, opts.RetryEnabled, &upstreamUnavailableAttempted) {
+				switched, switchErr := startStandardCompletionOnAlternateAccount(ctx, ds, a, stdReq, opts, maxAttempts)
+				if switchErr != nil {
+					return NonStreamResult{SessionID: sessionID, Payload: payload, Turn: turn, Attempts: attempts}, switchErr
+				}
+				if switched.Response != nil {
+					config.Logger.Info("[completion_runtime_upstream_unavailable_retry] retrying after upstream unavailable", "surface", stdReq.Surface, "stream", false, "account", a.AccountID)
+					sessionID = switched.SessionID
+					payload = switched.Payload
+					pow = switched.Pow
+					currentResp = switched.Response
+					usagePrompt = stdReq.PromptTokenText
+					accumulatedThinking = ""
+					accumulatedRawThinking = ""
+					accumulatedToolDetectionThinking = ""
+					continue
+				}
+			}
 			return NonStreamResult{SessionID: sessionID, Payload: payload, Turn: turn, Attempts: attempts}, turn.Error
 		}
 
@@ -333,6 +352,23 @@ func switchForRateLimited(ctx context.Context, policy *FailurePolicy, retryEnabl
 	}
 	*attempted = true
 	return policy.Handle(ctx, RateLimitedFailure("completion")) == FailureActionSwitchedAccount
+}
+
+// canRetryOnUpstreamUnavailable reports whether an "upstream returned no
+// output" completion result should recover by refreshing the token (or
+// switching accounts). It applies the failure policy's
+// HandleUpstreamUnavailable recovery ladder — RecheckBan → RefreshToken →
+// SwitchAccount — each at most once per request. attempted is set on the
+// first call regardless of outcome (one-shot semantics).
+func canRetryOnUpstreamUnavailable(ctx context.Context, policy *FailurePolicy, outErr *assistantturn.OutputError, retryEnabled bool, attempted *bool) bool {
+	if outErr == nil || outErr.Code != "upstream_unavailable" {
+		return false
+	}
+	if !retryEnabled || attempted == nil || *attempted {
+		return false
+	}
+	*attempted = true
+	return policy.HandleUpstreamUnavailable(ctx) != FailureActionFail
 }
 
 func startStandardCompletionOnAlternateAccount(ctx context.Context, ds DeepSeekCaller, a *auth.RequestAuth, stdReq promptcompat.StandardRequest, opts Options, maxAttempts int) (StartResult, *assistantturn.OutputError) {
@@ -406,6 +442,11 @@ func buildOptions(stdReq promptcompat.StandardRequest, prompt string, opts Optio
 
 func authOutputError(a *auth.RequestAuth) *assistantturn.OutputError {
 	if a != nil && a.UseConfigToken {
+		// The shared failure policy already exhausted RecheckBan →
+		// RefreshToken → SwitchAccount before this fallback is reached. Clear
+		// the stored token so the next request that leases this account forces
+		// a fresh login instead of retrying the same invalid credential.
+		a.MarkTokenInvalid()
 		return &assistantturn.OutputError{Status: http.StatusUnauthorized, Message: "Account token is invalid. Please re-login the account in admin.", Code: "error"}
 	}
 	return &assistantturn.OutputError{Status: http.StatusUnauthorized, Message: "Invalid token. If this should be a DS2API key, add it to config.keys first.", Code: "error"}

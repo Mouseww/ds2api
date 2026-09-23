@@ -106,6 +106,33 @@ func (p *FailurePolicy) Handle(ctx context.Context, failure *dsclient.RequestFai
 	}
 }
 
+// HandleUpstreamUnavailable maps an "upstream returned no output" completion
+// result (assistantturn code "upstream_unavailable", not a typed
+// *RequestFailure) to a lease action. A stale token can route a managed
+// account to a degraded backend that returns empty completions, so the same
+// recovery ladder used for managed auth failures applies: ban re-check (its
+// login refreshes the token), explicit token refresh, then switch. It shares
+// the recheckDone/refreshDone budgets with Handle so the ladder never runs
+// twice for one request.
+func (p *FailurePolicy) HandleUpstreamUnavailable(ctx context.Context) FailureAction {
+	if p == nil || p.a == nil || !p.a.UseConfigToken {
+		return FailureActionFail
+	}
+	if !p.recheckDone {
+		p.recheckDone = true
+		if _, refreshed := p.a.RecheckBan(ctx); refreshed {
+			return FailureActionRetrySameAccount
+		}
+	}
+	if !p.refreshDone {
+		p.refreshDone = true
+		if p.a.RefreshToken(ctx) {
+			return FailureActionRetrySameAccount
+		}
+	}
+	return p.switchOnce(ctx)
+}
+
 func (p *FailurePolicy) recheckOnce(ctx context.Context) {
 	if p.recheckDone {
 		return

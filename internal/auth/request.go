@@ -556,6 +556,17 @@ func (a *RequestAuth) RefreshToken(ctx context.Context) bool {
 	return a.resolver.RefreshToken(ctx, a)
 }
 
+// MarkTokenInvalid clears the stored token for this account. The next request
+// that leases this account will find an empty stored token and force a fresh
+// login, instead of repeatedly retrying an already-confirmed-invalid
+// credential.
+func (a *RequestAuth) MarkTokenInvalid() {
+	if a == nil || a.resolver == nil {
+		return
+	}
+	a.resolver.MarkTokenInvalid(a)
+}
+
 func (r *Resolver) Release(a *RequestAuth) {
 	if a == nil || !a.UseConfigToken || a.AccountID == "" {
 		return
