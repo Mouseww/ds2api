@@ -1,0 +1,12 @@
+services:
+  login-service:
+    image: ds2api-login-service:latest
+    container_name: login-service
+    restart: always
+    ports:
+      - "8787:8787"
+    # Chromium spawns many processes; without these ulimits the container hits
+    # "fork: Resource temporarily unavailable (11)" and login fails.
+    ulimits:
+      nproc: 65535
+      nofile: 65535
