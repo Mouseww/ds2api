@@ -81,6 +81,45 @@ function sendJSON(res, status, obj) {
 //   - password input:    <input type="password" placeholder="请输入密码">
 //   - submit "button":   <DIV role="button" class="ds-button--primary">登录</DIV>
 
+// Human-like interaction helpers. The Shumei fingerprint SDK (fp.min.js)
+// collects behavioral biometrics — keystroke dynamics, mouse trajectories,
+// focus events. page.fill() sets values with zero keyboard events, which the
+// SDK flags as automation, poisoning the smidV2 and causing
+// RISK_DEVICE_DETECTED. These helpers reproduce real user behavior instead.
+
+async function humanClick(page, loc) {
+  try {
+    const box = await loc.boundingBox();
+    if (box) {
+      const tx = box.x + box.width / 2;
+      const ty = box.y + box.height / 2;
+      // Move the mouse toward the target in a few small steps.
+      const steps = 3 + Math.floor(Math.random() * 3);
+      for (let i = 1; i <= steps; i++) {
+        await page.mouse.move(
+          tx * i / steps + (Math.random() - 0.5) * 6,
+          ty * i / steps + (Math.random() - 0.5) * 6,
+        );
+        await page.waitForTimeout(30 + Math.random() * 60);
+      }
+      await page.mouse.move(tx, ty);
+      await page.waitForTimeout(40 + Math.random() * 80);
+    }
+  } catch (_) { /* boundingBox can fail on detached elements */ }
+  await loc.click();
+  await page.waitForTimeout(150 + Math.random() * 350);
+}
+
+async function humanType(page, loc, text) {
+  await humanClick(page, loc); // focus the input with a real click first
+  for (const ch of text) {
+    await page.keyboard.type(ch);
+    // Natural typing rhythm: 40-170ms between keystrokes.
+    await page.waitForTimeout(40 + Math.random() * 130);
+  }
+  await page.waitForTimeout(200 + Math.random() * 400);
+}
+
 async function clickPasswordLoginToggle(page) {
   // The sign-in page defaults to phone + verification-code login. Switch to
   // the email/password form by clicking the "密码登录" toggle link.
@@ -96,7 +135,7 @@ async function clickPasswordLoginToggle(page) {
     try {
       const loc = page.locator(sel).first();
       await loc.waitFor({ state: 'visible', timeout: 8000 });
-      await loc.click();
+      await humanClick(page, loc);
       // Confirm the password form replaced the verification-code form.
       const pw = page.locator('input[type="password"]').first();
       await pw.waitFor({ state: 'visible', timeout: 8000 });
@@ -115,7 +154,7 @@ async function fillCredentialField(page, email, mobile) {
     try {
       await loc.waitFor({ state: 'visible', timeout: 15000 });
       const value = email || mobile;
-      await loc.fill(value);
+      await humanType(page, loc, value);
       return true;
     } catch (_) { /* try next */ }
   }
@@ -126,7 +165,7 @@ async function fillPasswordField(page, password) {
   const loc = page.locator('input[type="password"]').first();
   try {
     await loc.waitFor({ state: 'visible', timeout: 15000 });
-    await loc.fill(password);
+    await humanType(page, loc, password);
     return true;
   } catch (_) { return false; }
 }
@@ -135,7 +174,7 @@ async function clickSubmitButton(page) {
   const loc = page.getByRole('button', { name: /登录|Log in/i }).first();
   try {
     await loc.waitFor({ state: 'visible', timeout: 15000 });
-    await loc.click();
+    await humanClick(page, loc);
     return true;
   } catch (_) { return false; }
 }
@@ -148,9 +187,12 @@ async function launchCleanBrowser(userDataDir) {
   const args = [
     `--user-data-dir=${userDataDir}`,
     `--remote-debugging-port=${port}`,
+    `--window-size=1366,768`,
+    `--window-position=0,0`,
     '--no-sandbox',
     '--disable-dev-shm-usage',
     '--disable-blink-features=AutomationControlled',
+    '--disable-features=UserAgentClientHint',
     '--disable-infobars',
     '--no-first-run',
     '--no-default-browser-check',
@@ -162,6 +204,7 @@ async function launchCleanBrowser(userDataDir) {
     '--disable-gpu',
     '--disable-search-engine-choice-screen',
     '--lang=zh-CN',
+    '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36',
   ];
   if (LOGIN_PROXY) {
     args.push(`--proxy-server=${LOGIN_PROXY}`);
@@ -222,7 +265,10 @@ async function launchCleanBrowser(userDataDir) {
 async function performLogin(email, mobile, password) {
   const id = email || mobile;
   const profileHash = crypto.createHash('md5').update(id).digest('hex').slice(0, 12);
-  const userDataDir = `/tmp/ds-login-profile-${profileHash}`;
+  // Persistent profile directory (mounted as a volume so the device
+  // fingerprint survives container restarts).
+  const profileRoot = process.env.LOGIN_PROFILE_DIR || '/data/profiles';
+  const userDataDir = `${profileRoot}/ds-login-profile-${profileHash}`;
 
   // Stable per-profile x-device-id (UUID v4), persisted so the same account
   // always reuses the same header device id.
