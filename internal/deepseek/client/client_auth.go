@@ -38,30 +38,36 @@ var loginDeviceRotationPause = time.Second
 var loginServiceHTTPClient = &http.Client{Timeout: 60 * time.Second}
 
 func (c *Client) Login(ctx context.Context, acc config.Account) (string, error) {
-	// Use the browser login service if one is configured — it handles
-	// the AWS WAF challenge that plain API requests cannot pass. On
-	// success it returns a fresh device fingerprint that we persist
-	// for subsequent direct API logins.
-	if url := c.loginServiceURL(); url != "" {
-		token, err := c.loginWithService(ctx, url, acc)
+	// Fast path: the account carries a device fingerprint persisted from a
+	// previous browser login (device_id matches the server-issued
+	// thumbcache). Try the plain API login first — it completes in ~2s
+	// instead of the ~15s browser login.
+	if strings.TrimSpace(acc.DeviceID) != "" {
+		token, err := c.loginOnce(ctx, acc, acc.DeviceID)
 		if err == nil {
 			return token, nil
 		}
-		// If the login service itself got RISK_DEVICE_DETECTED, the
-		// browser fingerprint is still too suspicious. Fall through
-		// to the direct API path (with rotation) as a last resort. If
-		// it is a different error (network, wrong password), surface it.
+		// Only a flagged fingerprint falls through to the slow browser
+		// path; other errors (wrong password, network) surface directly.
 		if !isRiskDeviceDetected(err) {
 			return "", err
 		}
 		config.Logger.Warn(
-			"[login] login service returned RISK_DEVICE_DETECTED, falling back to direct API",
+			"[login] stored device fingerprint flagged, falling back to browser login",
 			"account", acc.Identifier(),
 			"error", err.Error(),
 		)
 	}
 
-	// Fallback: direct API login with device-fingerprint rotation.
+	// Slow path: browser login service. It performs the native form login
+	// (passing the AWS WAF challenge + Shumei behavioral biometrics) and
+	// returns a fresh device fingerprint that we persist, so the next login
+	// takes the fast path above.
+	if url := c.loginServiceURL(); url != "" {
+		return c.loginWithService(ctx, url, acc)
+	}
+
+	// No login service configured: plain API login with fingerprint rotation.
 	return c.loginWithRotation(ctx, acc)
 }
 
