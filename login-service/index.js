@@ -31,6 +31,12 @@ const HOST = process.env.LOGIN_SERVICE_HOST || '127.0.0.1';
 // Path to Chromium binary (bundled with Playwright Docker image).
 const CHROME_PATH = process.env.CHROME_PATH || '/ms-playwright/chromium-1200/chrome-linux64/chrome';
 
+// Optional egress proxy for the browser (e.g. "http://host:port" or
+// "socks5://host:port"). DeepSeek risk control flags by IP, so routing the
+// login through a clean residential/datacenter IP is the real fix for
+// RISK_DEVICE_DETECTED.
+const LOGIN_PROXY = process.env.LOGIN_PROXY || '';
+
 // How long (ms) to wait for the WAF challenge / first paint to settle after
 // navigation before we start filling the form.
 const SETTLE_MS = Number(process.env.LOGIN_SETTLE_MS || 4000);
@@ -139,7 +145,7 @@ async function clickSubmitButton(page) {
 // which are red flags for risk-control / device-fingerprint detection.
 async function launchCleanBrowser(userDataDir) {
   const port = 9000 + Math.floor(Math.random() * 2000);
-  const chrome = spawn(CHROME_PATH, [
+  const args = [
     `--user-data-dir=${userDataDir}`,
     `--remote-debugging-port=${port}`,
     '--no-sandbox',
@@ -156,8 +162,12 @@ async function launchCleanBrowser(userDataDir) {
     '--disable-gpu',
     '--disable-search-engine-choice-screen',
     '--lang=zh-CN',
-    'about:blank',
-  ], { stdio: 'ignore', detached: true });
+  ];
+  if (LOGIN_PROXY) {
+    args.push(`--proxy-server=${LOGIN_PROXY}`);
+  }
+  args.push('about:blank');
+  const chrome = spawn(CHROME_PATH, args, { stdio: 'ignore', detached: true });
   chrome.unref();
 
   // Wait for the CDP endpoint to become available.
@@ -214,6 +224,24 @@ async function performLogin(email, mobile, password) {
   const profileHash = crypto.createHash('md5').update(id).digest('hex').slice(0, 12);
   const userDataDir = `/tmp/ds-login-profile-${profileHash}`;
 
+  // Stable per-profile x-device-id (UUID v4), persisted so the same account
+  // always reuses the same header device id.
+  const xDeviceIdFile = `${userDataDir}/x-device-id.txt`;
+  let xDeviceId = null;
+  try {
+    const fs = require('fs');
+    if (fs.existsSync(xDeviceIdFile)) {
+      xDeviceId = fs.readFileSync(xDeviceIdFile, 'utf8').trim();
+    }
+  } catch (_) {}
+  if (!xDeviceId || !/^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(xDeviceId)) {
+    xDeviceId = crypto.randomUUID();
+    try {
+      require('fs').mkdirSync(userDataDir, { recursive: true });
+      require('fs').writeFileSync(xDeviceIdFile, xDeviceId);
+    } catch (_) {}
+  }
+
   const { browser, context, chrome } = await launchCleanBrowser(userDataDir);
   try {
     const page = await context.newPage();
@@ -221,6 +249,17 @@ async function performLogin(email, mobile, password) {
     // Hide automation signals.
     let token = null;
     let loginError = null;
+    let capturedDeviceId = null;
+
+    // Capture the device_id the browser sends in the login request body.
+    page.on('request', (req) => {
+      if (req.method() === 'POST' && req.url().includes('/api/v0/users/login')) {
+        try {
+          const body = JSON.parse(req.postData() || '{}');
+          if (body.device_id) capturedDeviceId = body.device_id;
+        } catch (_) {}
+      }
+    });
 
     page.on('response', async (resp) => {
       if (!resp.url().includes('/api/v0/users/login')) return;
@@ -288,11 +327,13 @@ async function performLogin(email, mobile, password) {
     // Wait for the login API response (or timeout).
     const deadline = Date.now() + LOGIN_TIMEOUT_MS;
     while (Date.now() < deadline) {
-      if (token) return token;
+      if (token) break;
       if (loginError) throw new Error(loginError);
       await page.waitForTimeout(250);
     }
-    if (token) return token;
+    if (token) {
+      return { token, device_id: capturedDeviceId || '', x_device_id: xDeviceId };
+    }
     throw new Error(loginError || 'login timed out');
   } finally {
     try { await browser.close(); } catch (_) {}
@@ -324,8 +365,13 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 400, { success: false, error: 'missing password' });
     }
     try {
-      const token = await performLogin(email, mobile, password);
-      return sendJSON(res, 200, { success: true, token });
+      const result = await performLogin(email, mobile, password);
+      return sendJSON(res, 200, {
+        success: true,
+        token: result.token,
+        device_id: result.device_id || '',
+        x_device_id: result.x_device_id || '',
+      });
     } catch (e) {
       // eslint-disable-next-line no-console
       console.error('login error:', e && e.message ? e.message : e);

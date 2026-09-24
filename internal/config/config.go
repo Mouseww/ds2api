@@ -34,8 +34,9 @@ type Account struct {
 	Mobile     string `json:"mobile,omitempty"`
 	Password   string `json:"password,omitempty"`
 	Token      string `json:"token,omitempty"`
+	UserID     string `json:"user_id,omitempty"`
 	DeviceID   string `json:"device_id,omitempty"`
-	DeviceUUID string `json:"device_uuid,omitempty"`
+	DeviceUUID string `json:"x_device_id,omitempty"`
 	ProxyID    string `json:"proxy_id,omitempty"`
 	// Enabled controls whether the account may be allocated by the load pool.
 	// A nil pointer means "enabled" for backward compatibility with older configs.
@@ -123,6 +124,7 @@ func (c *Config) NormalizeCredentials() {
 		c.Accounts[i].Remark = strings.TrimSpace(c.Accounts[i].Remark)
 		c.Accounts[i].DeviceID = strings.TrimSpace(c.Accounts[i].DeviceID)
 		c.Accounts[i].DeviceUUID = strings.TrimSpace(c.Accounts[i].DeviceUUID)
+		c.Accounts[i].UserID = strings.TrimSpace(c.Accounts[i].UserID)
 	}
 
 	c.Vercel = NormalizeVercelConfig(c.Vercel)

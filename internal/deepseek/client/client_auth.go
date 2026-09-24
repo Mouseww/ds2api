@@ -37,16 +37,43 @@ var loginDeviceRotationPause = time.Second
 var loginServiceHTTPClient = &http.Client{Timeout: 35 * time.Second}
 
 func (c *Client) Login(ctx context.Context, acc config.Account) (string, error) {
-	// If a browser-based login service URL is configured, delegate the
-	// WAF-protected login to it. The service performs a native form
-	// submission in headless Chromium, which passes the AWS WAF challenge
-	// that plain HTTP / fetch() requests cannot.
+	// Priority 1: the account carries a device fingerprint imported from the
+	// registration step (device_id + x_device_id). It matches the device that
+	// created the account, so the plain API login is accepted without a
+	// browser.
+	if strings.TrimSpace(acc.DeviceID) != "" {
+		token, err := c.loginOnce(ctx, acc, acc.DeviceID)
+		if err == nil {
+			return token, nil
+		}
+		// Only a flagged device fingerprint should fall through to the
+		// browser login service; other errors (wrong password, etc.) surface
+		// directly.
+		if !isRiskDeviceDetected(err) {
+			return "", err
+		}
+		config.Logger.Warn(
+			"[login] stored device fingerprint flagged, falling back to login service",
+			"account", acc.Identifier(),
+			"error", err.Error(),
+		)
+	}
+
+	// Priority 2: browser login service. It performs the native form login in
+	// headless Chromium (passing the AWS WAF challenge) and returns a fresh
+	// device fingerprint we persist for subsequent direct logins.
 	if url := c.loginServiceURL(); url != "" {
 		return c.loginWithService(ctx, url, acc)
 	}
 
-	// The x-device-id header needs a stable per-account UUID, generated once
-	// and persisted alongside the body-level device_id.
+	// Priority 3: plain API login with device-fingerprint rotation (no browser
+	// service configured).
+	return c.loginWithRotation(ctx, acc)
+}
+
+// loginWithRotation performs the plain API login, rotating the device
+// fingerprint when risk control rejects it (RISK_DEVICE_DETECTED).
+func (c *Client) loginWithRotation(ctx context.Context, acc config.Account) (string, error) {
 	deviceUUID, err := c.ensureAccountDeviceUUID(acc)
 	if err != nil {
 		return "", err
@@ -138,9 +165,11 @@ func (c *Client) loginWithService(ctx context.Context, serviceURL string, acc co
 	}
 
 	var result struct {
-		Success bool   `json:"success"`
-		Token   string `json:"token"`
-		Error   string `json:"error"`
+		Success   bool   `json:"success"`
+		Token     string `json:"token"`
+		DeviceID  string `json:"device_id"`
+		XDeviceID string `json:"x_device_id"`
+		Error     string `json:"error"`
 	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return "", fmt.Errorf("login service bad response: %w", err)
@@ -151,6 +180,15 @@ func (c *Client) loginWithService(ctx context.Context, serviceURL string, acc co
 			msg = "unknown error"
 		}
 		return "", fmt.Errorf("login service: %s", msg)
+	}
+
+	// Persist the device fingerprints the browser used, so subsequent logins
+	// can use the plain API path instead of the heavy browser service.
+	if result.DeviceID != "" {
+		_ = c.persistAccountDeviceID(acc, result.DeviceID)
+	}
+	if result.XDeviceID != "" {
+		_ = c.persistAccountDeviceUUID(acc, result.XDeviceID)
 	}
 	return result.Token, nil
 }
