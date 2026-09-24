@@ -337,7 +337,36 @@ async function performLogin(email, mobile, password) {
     await page.goto(SIGN_IN_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await page.waitForTimeout(SETTLE_MS);
     // eslint-disable-next-line no-console
-    console.log(`[login] loaded title="${await page.title().catch('?')}"`);
+    console.log(`[login] loaded url=${page.url().slice(0, 60)} title="${await page.title().catch('?')}"`);
+
+    // If the profile still has an active session, sign_in redirects to the
+    // homepage. The stored token is valid — return it directly instead of
+    // re-logging in (fastest path, no form interaction needed).
+    if (!page.url().includes('sign_in')) {
+      const stored = await page.evaluate(() => {
+        try {
+          const raw = localStorage.getItem('userToken');
+          if (!raw) return null;
+          const parsed = JSON.parse(raw);
+          return parsed && parsed.value ? parsed.value : null;
+        } catch (_) { return null; }
+      }).catch(() => null);
+      if (stored) {
+        // Also grab the thumbcache cookie so ds2api can persist the device_id.
+        let devId = '';
+        try {
+          const cookies = await context.cookies(['https://chat.deepseek.com']);
+          const tc = cookies.find(c => c.name.startsWith('.thumbcache'));
+          if (tc) devId = 'B' + decodeURIComponent(tc.value);
+        } catch (_) {}
+        // eslint-disable-next-line no-console
+        console.log('[login] active session, returning stored token');
+        return { token: stored, device_id: devId, x_device_id: xDeviceId };
+      }
+      // No stored token (logged out) — go back to the sign-in form.
+      await page.goto(SIGN_IN_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      await page.waitForTimeout(SETTLE_MS);
+    }
 
     // Switch to password login if the default is phone + verification code.
     const toggled = await clickPasswordLoginToggle(page);
@@ -383,7 +412,39 @@ async function performLogin(email, mobile, password) {
     throw new Error(loginError || 'login timed out');
   } finally {
     try { await browser.close(); } catch (_) {}
-    try { chrome.kill('SIGTERM'); } catch (_) {}
+    // Kill the whole Chrome process GROUP. With detached:true Chrome becomes
+    // a process-group leader, so -pid signals every child (renderers, GPU,
+    // crashpad). chrome.kill() only signals the main process and leaks the
+    // children as zombies under the container's PID 1.
+    try { process.kill(-chrome.pid, 'SIGKILL'); } catch (_) {}
+    try { process.kill(chrome.pid, 'SIGKILL'); } catch (_) {}
+  }
+}
+
+// Concurrency limiter: each browser login spawns a full Chrome (~30 procs,
+// ~500MB). Unbounded concurrency exhausts the host and degrades the Shumei
+// behavioral biometrics (slow renders distort typing timing).
+const MAX_CONCURRENT_LOGINS = Number(process.env.LOGIN_MAX_CONCURRENT || 2);
+let activeLogins = 0;
+const loginQueue = [];
+
+function acquireLoginSlot() {
+  return new Promise((resolve) => {
+    if (activeLogins < MAX_CONCURRENT_LOGINS) {
+      activeLogins++;
+      resolve();
+    } else {
+      loginQueue.push(resolve);
+    }
+  });
+}
+
+function releaseLoginSlot() {
+  activeLogins--;
+  const next = loginQueue.shift();
+  if (next) {
+    activeLogins++;
+    next();
   }
 }
 
@@ -411,13 +472,18 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 400, { success: false, error: 'missing password' });
     }
     try {
-      const result = await performLogin(email, mobile, password);
-      return sendJSON(res, 200, {
-        success: true,
-        token: result.token,
-        device_id: result.device_id || '',
-        x_device_id: result.x_device_id || '',
-      });
+      await acquireLoginSlot();
+      try {
+        const result = await performLogin(email, mobile, password);
+        return sendJSON(res, 200, {
+          success: true,
+          token: result.token,
+          device_id: result.device_id || '',
+          x_device_id: result.x_device_id || '',
+        });
+      } finally {
+        releaseLoginSlot();
+      }
     } catch (e) {
       // eslint-disable-next-line no-console
       console.error('login error:', e && e.message ? e.message : e);
