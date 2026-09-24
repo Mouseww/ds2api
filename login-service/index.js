@@ -21,10 +21,15 @@
 //   or { "mobile": "...", "password": "..." }
 
 const http = require('http');
+const { spawn } = require('child_process');
+const crypto = require('crypto');
 const { chromium } = require('playwright');
 
 const PORT = process.env.LOGIN_SERVICE_PORT ? Number(process.env.LOGIN_SERVICE_PORT) : 8787;
 const HOST = process.env.LOGIN_SERVICE_HOST || '127.0.0.1';
+
+// Path to Chromium binary (bundled with Playwright Docker image).
+const CHROME_PATH = process.env.CHROME_PATH || '/ms-playwright/chromium-1200/chrome-linux64/chrome';
 
 // How long (ms) to wait for the WAF challenge / first paint to settle after
 // navigation before we start filling the form.
@@ -75,8 +80,11 @@ async function clickPasswordLoginToggle(page) {
   // the email/password form by clicking the "密码登录" toggle link.
   const selectors = [
     'div.ds-sign-in-form__social-link:has-text("密码登录")',
+    'div.ds-sign-in-form__social-link:has-text("password")',
     '[role="button"]:has-text("密码登录")',
+    '[role="button"]:has-text("password")',
     'text="密码登录"',
+    'text="password"',
   ];
   for (const sel of selectors) {
     try {
@@ -126,30 +134,91 @@ async function clickSubmitButton(page) {
   } catch (_) { return false; }
 }
 
+// launchCleanBrowser starts Chromium manually (not through Playwright's launch)
+// so it does NOT add --enable-automation or --remote-debugging-pipe, both of
+// which are red flags for risk-control / device-fingerprint detection.
+async function launchCleanBrowser(userDataDir) {
+  const port = 9000 + Math.floor(Math.random() * 2000);
+  const chrome = spawn(CHROME_PATH, [
+    `--user-data-dir=${userDataDir}`,
+    `--remote-debugging-port=${port}`,
+    '--no-sandbox',
+    '--disable-dev-shm-usage',
+    '--disable-blink-features=AutomationControlled',
+    '--disable-infobars',
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-sync',
+    '--disable-background-networking',
+    '--disable-default-apps',
+    '--disable-extensions',
+    '--disable-component-update',
+    '--disable-gpu',
+    '--disable-search-engine-choice-screen',
+    '--lang=zh-CN',
+    'about:blank',
+  ], { stdio: 'ignore', detached: true });
+  chrome.unref();
+
+  // Wait for the CDP endpoint to become available.
+  const cdp = `http://127.0.0.1:${port}`;
+  for (let i = 0; i < 80; i++) {
+    try {
+      const r = await fetch(`${cdp}/json/version`);
+      if (r.ok) break;
+    } catch (_) { /* not ready yet */ }
+    await new Promise(r => setTimeout(r, 250));
+  }
+
+  const browser = await chromium.connectOverCDP(cdp);
+  const context = browser.contexts()[0];
+
+  // Anti-detection JS injections.
+  await context.addInitScript(`
+    // Remove webdriver flag
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    // Canvas noise: flip lowest alpha bit for large reads
+    const origGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+    CanvasRenderingContext2D.prototype.getImageData = function(x, y, w, h) {
+      const d = origGetImageData.call(this, x, y, w, h);
+      if (w * h > 50) {
+        for (let i = 3; i < d.data.length; i += Math.max(1, Math.floor(w * h / 200))) d.data[i] ^= 1;
+      }
+      return d;
+    };
+    // WebGL noise: append zero-width char to renderer string
+    try {
+      const origGP = WebGLRenderingContext.prototype.getParameter;
+      WebGLRenderingContext.prototype.getParameter = function(p) {
+        const r = origGP.call(this, p);
+        if (p === 37446 && typeof r === 'string') return r + '\\u200b';
+        return r;
+      };
+    } catch (_) {}
+    // Audio noise: sparse perturbation
+    try {
+      const origGCD = AudioBuffer.prototype.getChannelData;
+      AudioBuffer.prototype.getChannelData = function(c) {
+        const d = origGCD.call(this, c);
+        for (let i = 0; i < d.length; i += 997) d[i] += (Math.random() - 0.5) * 1e-12;
+        return d;
+      };
+    } catch (_) {}
+  `);
+
+  return { browser, context, chrome, port };
+}
+
 async function performLogin(email, mobile, password) {
-  const headless = process.env.LOGIN_HEADLESS === '1' || process.env.LOGIN_HEADLESS === 'true';
-  const browser = await chromium.launch({
-    headless,
-    args: [
-      '--disable-blink-features=AutomationControlled',
-      '--no-sandbox',
-      '--disable-dev-shm-usage',
-    ],
-  });
+  const id = email || mobile;
+  const profileHash = crypto.createHash('md5').update(id).digest('hex').slice(0, 12);
+  const userDataDir = `/tmp/ds-login-profile-${profileHash}`;
+
+  const { browser, context, chrome } = await launchCleanBrowser(userDataDir);
   try {
-    const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36',
-      viewport: { width: 1366, height: 768 },
-      locale: 'zh-CN',
-      timezoneId: 'Asia/Shanghai',
-    });
     const page = await context.newPage();
 
     // Hide automation signals.
-    await page.addInitScript(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-    });
-
     let token = null;
     let loginError = null;
 
@@ -158,27 +227,41 @@ async function performLogin(email, mobile, password) {
       try {
         const body = await resp.json();
         const code = body && body.code;
-        const bizData = body && body.data && body.data.biz_data;
+        const data = body && body.data;
+        const bizCode = data && data.biz_code;
+        const bizMsg = data && data.biz_msg;
+        const bizData = data && data.biz_data;
         const user = bizData && bizData.user;
+        // eslint-disable-next-line no-console
+        console.log(`[login] resp: status=${resp.status()} code=${code} biz_code=${bizCode} biz_msg=${bizMsg || ''}`);
         if (resp.status() === 200 && code === 0 && user && user.token) {
           token = user.token;
+        } else if (bizCode !== 0 && bizCode !== undefined) {
+          loginError = bizMsg || ('biz_code=' + bizCode);
         } else if (resp.status() === 200 && code !== 0) {
           loginError = (body && body.msg) || 'login rejected';
-        } else if (bizData && bizData.biz_code !== 0) {
-          loginError = bizData.biz_msg || body.data.biz_msg || 'login rejected';
         }
       } catch (_) {
-        // non-JSON or aborted response; ignore
+        // eslint-disable-next-line no-console
+        console.log('[login] non-JSON response url=' + resp.url());
       }
     });
 
+    // eslint-disable-next-line no-console
+    console.log('[login] goto sign_in');
     await page.goto(SIGN_IN_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await page.waitForTimeout(SETTLE_MS);
+    // eslint-disable-next-line no-console
+    console.log(`[login] loaded title="${await page.title().catch('?')}"`);
 
     // Switch to password login if the default is phone + verification code.
-    await clickPasswordLoginToggle(page);
+    const toggled = await clickPasswordLoginToggle(page);
+    // eslint-disable-next-line no-console
+    console.log(`[login] toggle=${toggled}`);
 
     const filled = await fillCredentialField(page, email, mobile);
+    // eslint-disable-next-line no-console
+    console.log(`[login] credential filled=${filled}`);
     if (!filled) {
       await page.screenshot({ path: '/tmp/login-debug.png', fullPage: true }).catch(() => {});
       const title = await page.title().catch(() => '?');
@@ -186,13 +269,19 @@ async function performLogin(email, mobile, password) {
       throw new Error(`login form not found (url=${url}, title=${title})`);
     }
 
-    if (!(await fillPasswordField(page, password))) {
+    const pwFilled = await fillPasswordField(page, password);
+    // eslint-disable-next-line no-console
+    console.log(`[login] pw filled=${pwFilled}`);
+    if (!pwFilled) {
       await page.screenshot({ path: '/tmp/login-debug-pw.png', fullPage: true }).catch(() => {});
       const inputs = await page.evaluate(() => Array.from(document.querySelectorAll('input')).map(i => ({ type: i.type, placeholder: i.placeholder, visible: i.offsetParent !== null }))).catch(() => []);
       throw new Error('password input missing; inputs=' + JSON.stringify(inputs));
     }
 
-    if (!(await clickSubmitButton(page))) {
+    const submitted = await clickSubmitButton(page);
+    // eslint-disable-next-line no-console
+    console.log(`[login] submit clicked=${submitted}`);
+    if (!submitted) {
       throw new Error('login form not found (submit button missing)');
     }
 
@@ -206,7 +295,8 @@ async function performLogin(email, mobile, password) {
     if (token) return token;
     throw new Error(loginError || 'login timed out');
   } finally {
-    await browser.close();
+    try { await browser.close(); } catch (_) {}
+    try { chrome.kill('SIGTERM'); } catch (_) {}
   }
 }
 
