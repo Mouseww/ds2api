@@ -3,10 +3,13 @@ package client
 import (
 	"context"
 	"fmt"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
 	"ds2api/internal/auth"
+	"ds2api/internal/config"
 )
 
 // DeepSeek applies rate-based login risk control per egress IP: observed in
@@ -25,11 +28,29 @@ import (
 //     loginRiskCooldown window during which attempts fail fast with
 //     auth.ErrLoginThrottled instead of re-flagging the IP.
 //
-// Both durations are package vars so tests can shrink them.
+// Both durations are package vars so tests can shrink them. Operators can
+// override them at startup with DS2API_LOGIN_MIN_INTERVAL and
+// DS2API_LOGIN_RISK_COOLDOWN (Go duration syntax, e.g. "30s", "10m").
 var (
-	loginMinInterval  = 30 * time.Second
-	loginRiskCooldown = 10 * time.Minute
+	loginMinInterval  = envLoginDuration("DS2API_LOGIN_MIN_INTERVAL", 30*time.Second)
+	loginRiskCooldown = envLoginDuration("DS2API_LOGIN_RISK_COOLDOWN", 10*time.Minute)
 )
+
+// envLoginDuration parses a positive duration from the environment, falling
+// back to def (with a warning) when unset, malformed, or non-positive.
+func envLoginDuration(name string, def time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return def
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		config.Logger.Warn("[login_gate] ignoring invalid env value, using default",
+			"env", name, "value", raw, "default", def.String())
+		return def
+	}
+	return d
+}
 
 // loginGate paces Client.Login per egress key. The zero value is ready to
 // use; per-key state is created lazily.

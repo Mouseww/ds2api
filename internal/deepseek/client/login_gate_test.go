@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -149,5 +150,40 @@ func TestLoginGateZeroValueReady(t *testing.T) {
 	g.markRisk("k")
 	if err := g.acquire(context.Background(), "k", "p1"); !errors.Is(err, auth.ErrLoginThrottled) {
 		t.Fatalf("zero-value gate markRisk/acquire: %v", err)
+	}
+}
+
+// TestEnvLoginDuration guards the env overrides for the gate durations:
+// valid durations are honored, malformed or non-positive values fall back
+// to the default.
+func TestEnvLoginDuration(t *testing.T) {
+	const name = "DS2API_TEST_LOGIN_DURATION"
+	const def = time.Minute
+
+	t.Setenv(name, "45s")
+	if got := envLoginDuration(name, def); got != 45*time.Second {
+		t.Fatalf("valid override ignored: got %s", got)
+	}
+	t.Setenv(name, "10m")
+	if got := envLoginDuration(name, def); got != 10*time.Minute {
+		t.Fatalf("valid override ignored: got %s", got)
+	}
+	t.Setenv(name, "bogus")
+	if got := envLoginDuration(name, def); got != def {
+		t.Fatalf("malformed value must fall back to default, got %s", got)
+	}
+	t.Setenv(name, "-5s")
+	if got := envLoginDuration(name, def); got != def {
+		t.Fatalf("non-positive value must fall back to default, got %s", got)
+	}
+	t.Setenv(name, "  ")
+	if got := envLoginDuration(name, def); got != def {
+		t.Fatalf("blank value must fall back to default, got %s", got)
+	}
+	if err := os.Unsetenv(name); err != nil {
+		t.Fatal(err)
+	}
+	if got := envLoginDuration(name, def); got != def {
+		t.Fatalf("unset value must fall back to default, got %s", got)
 	}
 }

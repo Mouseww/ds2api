@@ -169,9 +169,20 @@ pool.queue = activeSet               // 分配仅从 activeSet 进行
 
 `internal/deepseek/client/login_gate.go` 实现按出口（每代理一个 key；无代理账号共用 `"direct"`）的登录闸门，`Client.Login` 入口统一经过：
 
-1. **最小间隔**：同一出口的登录至少间隔 `loginMinInterval`（默认 30s）。首个登录立即放行；并发登录按预留槽位排队等待（等待期间取消返回 `ctx.Err()`）。
-2. **风控冷却**：登录以 `RISK_DEVICE_DETECTED` 失败时，该出口进入 `loginRiskCooldown`（默认 10m）冷却期，期间所有登录**快速失败**并返回包装 `auth.ErrLoginThrottled` 的错误（信息含代理 ID 与剩余冷却时间，不含代理凭据），避免继续打 flagged 的 IP。
+1. **最小间隔**：同一出口的登录至少间隔 `loginMinInterval`（默认 30s，可用环境变量 `DS2API_LOGIN_MIN_INTERVAL` 覆盖，Go duration 语法如 `45s`）。首个登录立即放行；并发登录按预留槽位排队等待（等待期间取消返回 `ctx.Err()`）。
+2. **风控冷却**：登录以 `RISK_DEVICE_DETECTED` 失败时，该出口进入 `loginRiskCooldown`（默认 10m，可用环境变量 `DS2API_LOGIN_RISK_COOLDOWN` 覆盖）冷却期，期间所有登录**快速失败**并返回包装 `auth.ErrLoginThrottled` 的错误（信息含代理 ID 与剩余冷却时间，不含代理凭据），避免继续打 flagged 的 IP。非法或非正的环境变量值回退默认并告警。
 3. **驱逐豁免**：`ErrLoginThrottled` 属于本地瞬时限流，账号本身健康，`RefreshToken` 对其不执行刷新失败驱逐（与 ctx 取消豁免同理）。
+
+### R10 — 账号检测 token-first 与按出口分组（Admin 检测不再强制登录）
+
+**动机**：R9 之前，Admin「检测」每个账号都做一次全新登录——即使账号手里 token 仍然有效。批量检测既慢（每账号一次登录、受 R9 限速排队）又白白消耗出口的登录配额，增加触发风控的概率。
+
+`internal/httpapi/admin/accounts/handler_accounts_testing.go` 的行为：
+
+1. **token-first**：`testAccount` 先用存量 token 直接 `CreateSession` 验证——成功即报「Token 有效（会话创建成功，未重新登录）」（亚秒级、零登录消耗）；失败（token 被拒）才降级走原有全量登录流程（受 R9 闸门限速）。存量 token 不被覆盖；检测状态照常写 `accTest`。
+2. **封禁账号例外**：已知封禁（`BanIsMuted == 1`）的账号不走 token-first，保持全量登录路径——其检测目的就是刷新封禁状态，且封禁账号的 token 可用性不代表账号可用。
+3. **test-all 按出口分组**：`runAccountTestsConcurrently` 按 `proxy_id`（无代理归 `"direct"`）分组，组间并行（不同出口的闸门互相独立）、组内串行（同一出口不会同时有多个检测在闸门排队），全局并发上限 8，结果保持输入顺序。
+4. **WebUI 语义**：批量检测由前端逐个串行调用 `/admin/accounts/test`（保持逐账号进度反馈），同样受益于 token-first；相关文案从「刷新 Token」改为「检测」。
 
 ---
 

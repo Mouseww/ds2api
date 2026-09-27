@@ -112,13 +112,16 @@ func TestRunAccountTestsConcurrentlyKeepsInputOrder(t *testing.T) {
 
 func TestRunAccountTestsConcurrentlyRespectsLimit(t *testing.T) {
 	const limit = 3
+	// Distinct egresses: each proxy ID forms its own group, so the global
+	// semaphore is what caps concurrency. Same-egress sequencing is covered
+	// by the accounts package tests.
 	accounts := []config.Account{
-		{Email: "1@example.com"},
-		{Email: "2@example.com"},
-		{Email: "3@example.com"},
-		{Email: "4@example.com"},
-		{Email: "5@example.com"},
-		{Email: "6@example.com"},
+		{Email: "1@example.com", ProxyID: "p1"},
+		{Email: "2@example.com", ProxyID: "p2"},
+		{Email: "3@example.com", ProxyID: "p3"},
+		{Email: "4@example.com", ProxyID: "p4"},
+		{Email: "5@example.com", ProxyID: "p5"},
+		{Email: "6@example.com", ProxyID: "p6"},
 	}
 	var current int32
 	var maxSeen int32

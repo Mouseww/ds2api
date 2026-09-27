@@ -61,8 +61,9 @@ func (h *Handler) testAllAccounts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Concurrent testing with a semaphore to limit parallelism.
-	const maxConcurrency = 5
+	// Tests run grouped by egress (see runAccountTestsConcurrently): groups
+	// in parallel, sequential within a group, capped globally.
+	const maxConcurrency = 8
 	results := runAccountTestsConcurrently(accounts, maxConcurrency, func(_ int, account config.Account) map[string]any {
 		return h.testAccount(r.Context(), account, model, "")
 	})
@@ -87,21 +88,42 @@ func (h *Handler) testAllAccounts(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// runAccountTestsConcurrently runs testFn over accounts grouped by egress
+// (proxy ID, or "direct" for accounts without a proxy). Groups run in
+// parallel — different egresses have independent login gates — while tests
+// inside a group run sequentially, so a single egress never has several
+// tests waiting on its gate at once. maxConcurrency caps the total number of
+// in-flight tests across all groups. Results keep the input order.
 func runAccountTestsConcurrently(accounts []config.Account, maxConcurrency int, testFn func(int, config.Account) map[string]any) []map[string]any {
 	if maxConcurrency <= 0 {
 		maxConcurrency = 1
 	}
-	sem := make(chan struct{}, maxConcurrency)
-	results := make([]map[string]any, len(accounts))
-	var wg sync.WaitGroup
+	groups := make(map[string][]int)
+	order := make([]string, 0, len(accounts))
 	for i, acc := range accounts {
+		key := acc.ProxyID
+		if key == "" {
+			key = "direct"
+		}
+		if _, seen := groups[key]; !seen {
+			order = append(order, key)
+		}
+		groups[key] = append(groups[key], i)
+	}
+	results := make([]map[string]any, len(accounts))
+	sem := make(chan struct{}, maxConcurrency)
+	var wg sync.WaitGroup
+	for _, key := range order {
+		indices := groups[key]
 		wg.Add(1)
-		go func(idx int, account config.Account) {
+		go func() {
 			defer wg.Done()
-			sem <- struct{}{}        // acquire
-			defer func() { <-sem }() // release
-			results[idx] = testFn(idx, account)
-		}(i, acc)
+			for _, idx := range indices {
+				sem <- struct{}{} // acquire
+				results[idx] = testFn(idx, accounts[idx])
+				<-sem // release
+			}
+		}()
 	}
 	wg.Wait()
 	return results
@@ -127,42 +149,63 @@ func (h *Handler) testAccount(ctx context.Context, acc config.Account, model, me
 		}
 		_ = h.Store.UpdateAccountTestStatus(identifier, status)
 	}()
-	token, err := h.DS.Login(ctx, acc)
-	if err != nil {
-		result["message"] = "登录失败: " + err.Error()
-		return result
-	}
-	if err := h.Store.UpdateAccountToken(acc.Identifier(), token); err != nil {
-		result["config_warning"] = "登录成功，但 token 持久化失败（仅保存在内存，重启后会丢失）: " + err.Error()
-	}
-	// The login response refreshed the ban fields: a banned account is disabled
-	// and evicted instead of being reported as a successful refresh.
-	if bannedAcc, banned := h.applyLoginBanState(identifier); banned {
-		markBannedResult(result, bannedAcc, int(time.Since(start).Milliseconds()))
-		return result
-	}
-	authCtx := &authn.RequestAuth{UseConfigToken: false, DeepSeekToken: token, AccountID: identifier, Account: acc}
+	authCtx := &authn.RequestAuth{UseConfigToken: false, AccountID: identifier, Account: acc}
 	proxyCtx := authn.WithAuth(ctx, authCtx)
-	sessionID, err := h.DS.CreateSession(proxyCtx, authCtx, 1)
-	if err != nil {
-		newToken, loginErr := h.DS.Login(proxyCtx, acc)
-		if loginErr != nil {
-			result["message"] = "创建会话失败: " + err.Error()
+
+	// Token-first: for accounts not currently flagged banned, verify the
+	// stored token with a cheap session creation before doing a full
+	// (gate-paced) login. Most tests finish here in well under a second
+	// without consuming a login through the egress. Banned accounts keep
+	// the login path: their test exists to refresh the ban state.
+	token := strings.TrimSpace(acc.Token)
+	viaStoredToken := false
+	var sessionID string
+	if token != "" && !acc.IsBanned() {
+		authCtx.DeepSeekToken = token
+		if sid, err := h.DS.CreateSession(proxyCtx, authCtx, 1); err == nil {
+			sessionID, viaStoredToken = sid, true
+		} else {
+			token = "" // stored token rejected → fall back to a fresh login
+		}
+	}
+	if !viaStoredToken {
+		fresh, err := h.DS.Login(ctx, acc)
+		if err != nil {
+			result["message"] = "登录失败: " + err.Error()
 			return result
 		}
-		token = newToken
+		token = fresh
 		authCtx.DeepSeekToken = token
 		if err := h.Store.UpdateAccountToken(acc.Identifier(), token); err != nil {
-			result["config_warning"] = "刷新 token 成功，但 token 持久化失败（仅保存在内存，重启后会丢失）: " + err.Error()
+			result["config_warning"] = "登录成功，但 token 持久化失败（仅保存在内存，重启后会丢失）: " + err.Error()
 		}
+		// The login response refreshed the ban fields: a banned account is disabled
+		// and evicted instead of being reported as a successful refresh.
 		if bannedAcc, banned := h.applyLoginBanState(identifier); banned {
 			markBannedResult(result, bannedAcc, int(time.Since(start).Milliseconds()))
 			return result
 		}
 		sessionID, err = h.DS.CreateSession(proxyCtx, authCtx, 1)
 		if err != nil {
-			result["message"] = "创建会话失败: " + err.Error()
-			return result
+			newToken, loginErr := h.DS.Login(proxyCtx, acc)
+			if loginErr != nil {
+				result["message"] = "创建会话失败: " + err.Error()
+				return result
+			}
+			token = newToken
+			authCtx.DeepSeekToken = token
+			if err := h.Store.UpdateAccountToken(acc.Identifier(), token); err != nil {
+				result["config_warning"] = "刷新 token 成功，但 token 持久化失败（仅保存在内存，重启后会丢失）: " + err.Error()
+			}
+			if bannedAcc, banned := h.applyLoginBanState(identifier); banned {
+				markBannedResult(result, bannedAcc, int(time.Since(start).Milliseconds()))
+				return result
+			}
+			sessionID, err = h.DS.CreateSession(proxyCtx, authCtx, 1)
+			if err != nil {
+				result["message"] = "创建会话失败: " + err.Error()
+				return result
+			}
 		}
 	}
 
@@ -174,7 +217,11 @@ func (h *Handler) testAccount(ctx context.Context, acc config.Account, model, me
 
 	if strings.TrimSpace(message) == "" {
 		result["success"] = true
-		result["message"] = "Token 刷新成功（登录与会话创建成功）"
+		if viaStoredToken {
+			result["message"] = "Token 有效（会话创建成功，未重新登录）"
+		} else {
+			result["message"] = "Token 刷新成功（登录与会话创建成功）"
+		}
 		if warning, _ := result["config_warning"].(string); strings.TrimSpace(warning) != "" {
 			result["message"] = result["message"].(string) + "；" + warning
 		}
