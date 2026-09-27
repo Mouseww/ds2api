@@ -62,6 +62,14 @@ func NewApp() (*App, error) {
 	// Background monitor re-checks auto-disabled (banned) accounts once their
 	// mute expires and re-enables any whose ban was lifted.
 	resolver.StartUnbanMonitor(context.Background())
+	// The token keeper validates the active pool's stored tokens with the
+	// read-only session-list fetch and provisions missing ones, so pooled
+	// requests never pay a cold login. Started after Rebalance below so the
+	// first sweep sees the usage-filtered active queue.
+	resolver.TokenProbe = func(ctx context.Context, token string) error {
+		_, err := dsClient.GetSessionCountForToken(ctx, token)
+		return err
+	}
 	chatHistoryStore := chathistory.New(config.ChatHistoryPath())
 	if err := chatHistoryStore.Err(); err != nil {
 		config.Logger.Warn("[chat_history] unavailable", "path", chatHistoryStore.Path(), "error", err)
@@ -84,6 +92,9 @@ func NewApp() (*App, error) {
 		return out
 	})
 	pool.Rebalance()
+	// Started after Rebalance so the first sweep only covers accounts that
+	// survived the daily-usage filter.
+	resolver.StartPoolTokenKeeper(context.Background())
 
 	modelsHandler := &shared.ModelsHandler{Store: store}
 	chatHandler := &chat.Handler{Store: store, Auth: resolver, DS: dsClient, ChatHistory: chatHistoryStore}

@@ -184,6 +184,17 @@ pool.queue = activeSet               // 分配仅从 activeSet 进行
 3. **test-all 按出口分组**：`runAccountTestsConcurrently` 按 `proxy_id`（无代理归 `"direct"`）分组，组间并行（不同出口的闸门互相独立）、组内串行（同一出口不会同时有多个检测在闸门排队），全局并发上限 8，结果保持输入顺序。
 4. **WebUI 语义**：批量检测由前端逐个串行调用 `/admin/accounts/test`（保持逐账号进度反馈），同样受益于 token-first；相关文案从「刷新 Token」改为「检测」。
 
+### R11 — 池内 token 保障（token keeper 后台巡检）
+
+**动机**：入池账号可能没有存量 token（新建/导入账号、token 被清空），首个请求要现场付一次全量登录（受 R9 闸门排队，秒级到分钟级延迟），失败还会触发账号切换。R10 只解决「检测」路径的浪费，运行期流量仍然依赖惰性登录。
+
+`internal/auth/request_token_keeper.go` 的后台巡检（`Resolver.StartPoolTokenKeeper`，`internal/server/router.go` 在 `pool.Rebalance()` 之后启动，保证首轮看到的是经过用量过滤的活跃队列）：
+
+1. **巡检节奏**：启动时立即执行一轮（新启动的服务不用等满一个间隔就完成活跃池供 token），之后每 `poolTokenKeepInterval`（默认 5m，环境变量 `DS2API_TOKEN_KEEP_INTERVAL` 覆盖，Go duration 语法如 `90s`；`off`/`disabled`/`0` 关闭；非法值回退默认并告警）扫一遍 `Pool.ActiveAccounts()`（活跃队列快照，不含 standby——为 585 个备用账号批量登录是风控灾难，活跃池才有流量需要）。
+2. **每账号策略**：跳过已禁用/封禁账号；token 刚刷新过（流量驱动登录、unban monitor 或 keeper 自身，间隔内）直接跳过；有存量 token 先用只读 `GetSessionCountForToken` 探测（`Resolver.TokenProbe`，走账号自己的代理出口，不创建会话、不消耗登录）——探测通过即跳过；**连续两次**探测被拒（`keeperFailureThreshold = 2`，与 R8 错误驱逐阈值同理：单次被拒可能是瞬时网络错误）才判定 token 失效并重新登录；无 token 直接登录补发。
+3. **失败退避**：登录失败（密码错误、验证码、上游错误）连续两次后，该账号暂停 `keeperFailurePause`（默认 1h）再重试——永久损坏的账号表现为周期性告警而非登录风暴；`ErrLoginThrottled`（本地闸门限流）与 ctx 取消不计入失败、不暂停，下轮照常重试。keeper 自身**从不驱逐**账号——驱逐仍由失败策略（`refresh_failed`/`error_count`）与封禁检测负责。
+4. **登录安全**：所有登录走共享 `performLogin` singleflight（与流量驱动登录、unban monitor 合并同账号并发）与 R9 按出口闸门（30s 间隔、风控冷却），keeper 不可能绕过或加剧限速。
+
 ---
 
 ## 4. 数据模型变更

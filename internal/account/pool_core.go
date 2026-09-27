@@ -222,6 +222,17 @@ func (p *Pool) Release(accountID string) {
 	}
 }
 
+// ActiveAccounts returns a snapshot copy of the active pool queue — the
+// accounts currently eligible for dispatch. Standby accounts are excluded.
+// The caller owns the returned slice and may mutate it freely.
+func (p *Pool) ActiveAccounts() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]string, len(p.queue))
+	copy(out, p.queue)
+	return out
+}
+
 func (p *Pool) Status() map[string]any {
 	// The quota snapshot is read before p.mu: usageSnapshot takes p.mu
 	// internally, so reading it under Status' own lock would deadlock.

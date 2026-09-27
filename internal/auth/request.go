@@ -77,28 +77,47 @@ type RequestAuth struct {
 type LoginFunc func(ctx context.Context, acc config.Account) (string, error)
 type PostLoginFunc func(ctx context.Context, a *RequestAuth)
 
+// TokenProbeFunc cheaply verifies that a stored DeepSeek token still works
+// without logging in or creating a session (e.g. the read-only session-list
+// fetch). The ctx carries the account's RequestAuth so the probe leaves
+// through the account's own proxy.
+type TokenProbeFunc func(ctx context.Context, token string) error
+
 type Resolver struct {
 	Store     *config.Store
 	Pool      *account.Pool
 	Login     LoginFunc
 	PostLogin PostLoginFunc
 
+	// TokenProbe is an optional read-only token validator used by the pool
+	// token keeper to distinguish a healthy stored token from a stale one
+	// before burning a (gate-paced) login on it.
+	TokenProbe TokenProbeFunc
+
 	mu               sync.Mutex
 	tokenRefreshedAt map[string]time.Time
 	banRecheckedAt   map[string]time.Time
 	accountErrors    map[string]int
 	loginFlights     map[string]*loginFlight
+
+	// Pool-token-keeper state: consecutive keeper failures per account
+	// (probe rejections or login failures) and when the last one happened.
+	// Guarded by mu.
+	keeperFailures     map[string]int
+	keeperLastFailedAt map[string]time.Time
 }
 
 func NewResolver(store *config.Store, pool *account.Pool, login LoginFunc) *Resolver {
 	return &Resolver{
-		Store:            store,
-		Pool:             pool,
-		Login:            login,
-		tokenRefreshedAt: map[string]time.Time{},
-		banRecheckedAt:   map[string]time.Time{},
-		accountErrors:    map[string]int{},
-		loginFlights:     map[string]*loginFlight{},
+		Store:              store,
+		Pool:               pool,
+		Login:              login,
+		tokenRefreshedAt:   map[string]time.Time{},
+		banRecheckedAt:     map[string]time.Time{},
+		accountErrors:      map[string]int{},
+		loginFlights:       map[string]*loginFlight{},
+		keeperFailures:     map[string]int{},
+		keeperLastFailedAt: map[string]time.Time{},
 	}
 }
 
