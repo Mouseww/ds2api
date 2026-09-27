@@ -13,10 +13,11 @@ import (
 )
 
 // newManagedTestAuth returns a request lease on the first of three managed
-// accounts plus a login recorder used to observe re-check / refresh /
-// switch-bootstrap logins. (Env-backed configs clear stored tokens, so the
-// initial Determine and every post-switch token bootstrap perform a login.)
-func newManagedTestAuth(t *testing.T) (*auth.RequestAuth, *[]string) {
+// accounts, a login recorder used to observe re-check / refresh /
+// switch-bootstrap logins, and the store backing the resolver. (Env-backed
+// configs clear stored tokens, so the initial Determine and every post-switch
+// token bootstrap perform a login.)
+func newManagedTestAuth(t *testing.T) (*auth.RequestAuth, *[]string, *config.Store) {
 	t.Helper()
 	t.Setenv("DS2API_CONFIG_JSON", `{
 		"keys":["managed-key"],
@@ -39,11 +40,11 @@ func newManagedTestAuth(t *testing.T) (*auth.RequestAuth, *[]string) {
 		t.Fatalf("determine failed: %v", err)
 	}
 	t.Cleanup(func() { resolver.Release(a) })
-	return a, logins
+	return a, logins, store
 }
 
 func TestFailurePolicyCaptchaRechecksBanAndSwitchesExactlyOnce(t *testing.T) {
-	a, logins := newManagedTestAuth(t)
+	a, logins, _ := newManagedTestAuth(t)
 	if a.AccountID != "acc1@test.com" {
 		t.Fatalf("expected initial lease on acc1, got %q", a.AccountID)
 	}
@@ -81,7 +82,7 @@ func TestFailurePolicyCaptchaRechecksBanAndSwitchesExactlyOnce(t *testing.T) {
 }
 
 func TestFailurePolicyManagedUnauthorizedLadder(t *testing.T) {
-	a, logins := newManagedTestAuth(t)
+	a, logins, store := newManagedTestAuth(t)
 	policy := NewFailurePolicy(a)
 	failure := &dsclient.RequestFailure{Op: "create session", Kind: dsclient.FailureManagedUnauthorized, Message: "token expired"}
 
@@ -128,10 +129,70 @@ func TestFailurePolicyManagedUnauthorizedLadder(t *testing.T) {
 			t.Fatalf("login %d = %q want %q (all=%v)", i, (*logins)[i], want, *logins)
 		}
 	}
+
+	// Managed auth failures are the normal token lifecycle (the refresh ladder
+	// above succeeded twice), so they must NOT count toward the pool error
+	// budget: acc1 stays enabled after four unauthorized failures.
+	acc, ok := store.FindAccount("acc1@test.com")
+	if !ok {
+		t.Fatal("expected acc1 to exist")
+	}
+	if !acc.IsEnabled() {
+		t.Fatalf("expected acc1 to stay enabled after unauthorized failures, disabled_reason=%q", acc.DisabledReason)
+	}
+}
+
+// TestFailurePolicyUpstreamUnavailableEvictsAfterTwoErrors guards eviction
+// rule 2 through the shared policy: two empty-output (upstream_unavailable)
+// failures on the same leased account auto-disable it with reason
+// "error_count" and remove it from the pool. The first failure is absorbed by
+// the ban re-check (its login refreshes the token), the second by the
+// explicit refresh — both retry on the same account, so the eviction is
+// observable only through the store.
+func TestFailurePolicyUpstreamUnavailableEvictsAfterTwoErrors(t *testing.T) {
+	a, logins, store := newManagedTestAuth(t)
+	policy := NewFailurePolicy(a)
+
+	if got := policy.HandleUpstreamUnavailable(context.Background()); got != FailureActionRetrySameAccount {
+		t.Fatalf("first upstream-unavailable: expected retry-same-account via re-check, got %v", got)
+	}
+	if got := policy.HandleUpstreamUnavailable(context.Background()); got != FailureActionRetrySameAccount {
+		t.Fatalf("second upstream-unavailable: expected retry-same-account via refresh, got %v", got)
+	}
+	if a.AccountID != "acc1@test.com" {
+		t.Fatalf("lease must stay on acc1 across both retries, got %q", a.AccountID)
+	}
+
+	acc, ok := store.FindAccount("acc1@test.com")
+	if !ok {
+		t.Fatal("expected acc1 to exist")
+	}
+	if acc.IsEnabled() {
+		t.Fatal("expected acc1 to be evicted after two upstream-unavailable errors")
+	}
+	if acc.DisabledReason != "error_count" {
+		t.Fatalf("expected disabled_reason error_count, got %q", acc.DisabledReason)
+	}
+	other, ok := store.FindAccount("acc2@test.com")
+	if !ok || !other.IsEnabled() {
+		t.Fatal("expected acc2 to stay enabled")
+	}
+
+	// Login sequence: acc1 bootstrap (determine), acc1 ban re-check (first
+	// failure), acc1 explicit refresh (second failure).
+	wantLogins := []string{"acc1@test.com", "acc1@test.com", "acc1@test.com"}
+	if len(*logins) != len(wantLogins) {
+		t.Fatalf("login sequence mismatch: got %v want %v", *logins, wantLogins)
+	}
+	for i, want := range wantLogins {
+		if (*logins)[i] != want {
+			t.Fatalf("login %d = %q want %q (all=%v)", i, (*logins)[i], want, *logins)
+		}
+	}
 }
 
 func TestFailurePolicyUnknownFailureNeverTouchesLease(t *testing.T) {
-	a, logins := newManagedTestAuth(t)
+	a, logins, _ := newManagedTestAuth(t)
 	policy := NewFailurePolicy(a)
 
 	if got := policy.Handle(context.Background(), &dsclient.RequestFailure{Op: "create session", Kind: dsclient.FailureUnknown, Message: "boom"}); got != FailureActionFail {
@@ -146,7 +207,7 @@ func TestFailurePolicyUnknownFailureNeverTouchesLease(t *testing.T) {
 }
 
 func TestStartCompletionRoutesCreateSessionCaptchaThroughPolicy(t *testing.T) {
-	a, logins := newManagedTestAuth(t)
+	a, logins, _ := newManagedTestAuth(t)
 	ds := &fakeDeepSeekCaller{
 		sessionByAccount: true,
 		createSessionErrs: []error{
@@ -185,7 +246,7 @@ func TestStartCompletionRoutesCreateSessionCaptchaThroughPolicy(t *testing.T) {
 }
 
 func TestStartCompletionUploadAuthFailureRetriesSameAccountThroughPolicy(t *testing.T) {
-	a, logins := newManagedTestAuth(t)
+	a, logins, _ := newManagedTestAuth(t)
 	ds := &fakeDeepSeekCaller{
 		sessionByAccount: true,
 		uploadErrs: []error{
@@ -230,7 +291,7 @@ func TestStartCompletionUploadAuthFailureRetriesSameAccountThroughPolicy(t *test
 // burned for one request. Now the client is policy-free and the shared
 // policy (plus the auth-layer switch guard) allows exactly one switch.
 func TestExecuteNonStreamWithRetrySwitchesExactlyOncePerRequest(t *testing.T) {
-	a, logins := newManagedTestAuth(t)
+	a, logins, _ := newManagedTestAuth(t)
 	ds := &fakeDeepSeekCaller{
 		sessionByAccount: true,
 		createSessionErrs: []error{
@@ -288,7 +349,7 @@ func TestExecuteNonStreamWithRetrySwitchesExactlyOncePerRequest(t *testing.T) {
 // RecheckBan before the consolidation (only the client's session/pow loops
 // did). Now every 429-mapped switch re-checks the rate-limited account first.
 func TestExecuteNonStreamWithRetryRechecksBanOnInitial429(t *testing.T) {
-	a, logins := newManagedTestAuth(t)
+	a, logins, _ := newManagedTestAuth(t)
 	ds := &fakeDeepSeekCaller{
 		sessionByAccount: true,
 		responses: []*http.Response{
@@ -328,7 +389,7 @@ func TestExecuteNonStreamWithRetryRechecksBanOnInitial429(t *testing.T) {
 // re-checks the rate-limited account through the shared policy before
 // switching.
 func TestExecuteStreamWithRetryRechecksBanOnSwitch(t *testing.T) {
-	a, logins := newManagedTestAuth(t)
+	a, logins, _ := newManagedTestAuth(t)
 	ds := &fakeDeepSeekCaller{
 		sessionByAccount: true,
 		responses: []*http.Response{

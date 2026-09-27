@@ -42,7 +42,11 @@ type Account struct {
 	// A nil pointer means "enabled" for backward compatibility with older configs.
 	Enabled *bool `json:"enabled,omitempty"`
 	// DisabledReason records why the account was disabled: "" (none),
-	// "banned" (auto-disabled by ban detection) or "manual".
+	// "banned" (auto-disabled by ban detection), "manual",
+	// "refresh_failed" (auto-disabled: token refresh failed) or
+	// "error_count" (auto-disabled: accumulated too many upstream errors).
+	// Only "banned" is auto-reverted (by the unban monitor); the others
+	// require a manual re-enable.
 	DisabledReason string `json:"disabled_reason,omitempty"`
 	// Ban status, refreshed on each login / token refresh.
 	BanIsMuted   int     `json:"ban_is_muted,omitempty"`   // 1 = muted (user.chat.is_muted)

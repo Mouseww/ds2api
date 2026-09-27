@@ -271,6 +271,8 @@
         "noUnbanTime": "No unban time",
         "statusCode": "Status code",
         "disabledByBan": "Auto-disabled (banned)",
+        "disabledByRefreshFailure": "Auto-disabled (token refresh failed)",
+        "disabledByErrorCount": "Auto-disabled (repeated errors)",
         "disabledManual": "Manually disabled",
         "enableAccount": "Enable",
         "disableAccount": "Disable",

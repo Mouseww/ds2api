@@ -269,6 +269,8 @@
         "noUnbanTime": "无解封时间",
         "statusCode": "状态码",
         "disabledByBan": "因封禁自动禁用",
+        "disabledByRefreshFailure": "因令牌刷新失败自动禁用",
+        "disabledByErrorCount": "因连续错误自动禁用",
         "disabledManual": "手动禁用",
         "enableAccount": "启用",
         "disableAccount": "禁用",

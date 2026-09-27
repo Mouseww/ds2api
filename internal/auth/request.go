@@ -34,6 +34,13 @@ const (
 	// auto-disabled (banned) accounts whose mute timestamp has lapsed, so it
 	// can re-login and re-enable any account whose ban was lifted.
 	banUnbanCheckInterval = 60 * time.Second
+
+	// accountErrorEvictThreshold is how many consecutive upstream errors
+	// (captcha challenge, rate limit, empty upstream output) an enabled
+	// pooled account may accumulate before it is auto-disabled and removed
+	// from the pool. The counter is cleared on eviction, so a manually
+	// re-enabled account starts with a fresh slate.
+	accountErrorEvictThreshold = 2
 )
 
 // banUnbanLoginPause spaces out the unban monitor's re-login attempts across
@@ -72,6 +79,7 @@ type Resolver struct {
 	mu               sync.Mutex
 	tokenRefreshedAt map[string]time.Time
 	banRecheckedAt   map[string]time.Time
+	accountErrors    map[string]int
 	loginFlights     map[string]*loginFlight
 }
 
@@ -82,6 +90,7 @@ func NewResolver(store *config.Store, pool *account.Pool, login LoginFunc) *Reso
 		Login:            login,
 		tokenRefreshedAt: map[string]time.Time{},
 		banRecheckedAt:   map[string]time.Time{},
+		accountErrors:    map[string]int{},
 		loginFlights:     map[string]*loginFlight{},
 	}
 }
@@ -329,6 +338,68 @@ func (r *Resolver) disableBannedAccount(accountID string, acc config.Account) {
 	)
 }
 
+// evictAccountFromPool auto-disables the account with the given reason and
+// removes it from the load pool. It is the shared sink for the pool eviction
+// rules: a failed token refresh (reason "refresh_failed") and an account that
+// accumulated too many upstream errors (reason "error_count"). The persisted
+// token and credentials are preserved, so re-enabling the account manually
+// does not require re-entering them. Accounts that are already disabled keep
+// their original reason (e.g. "banned" or "manual"); eviction is idempotent.
+// Reasons other than "banned" are never auto-reverted by the unban monitor.
+func (r *Resolver) evictAccountFromPool(accountID string, reason string) {
+	if r == nil || r.Store == nil || strings.TrimSpace(accountID) == "" {
+		return
+	}
+	if acc, ok := r.Store.FindAccount(accountID); ok && !acc.IsEnabled() {
+		return
+	}
+	if err := r.Store.SetAccountEnabled(accountID, false, reason); err != nil {
+		config.Logger.Warn("[pool_evict] disabling account failed", "account", accountID, "reason", reason, "error", err)
+		return
+	}
+	r.clearAccountErrors(accountID)
+	if r.Pool != nil {
+		r.Pool.RemoveAccount(accountID)
+	}
+	config.Logger.Warn(
+		"[pool_evict] account auto-disabled and removed from pool",
+		"account", accountID,
+		"reason", reason,
+	)
+}
+
+// NoteAccountError records one upstream error attributed to the account
+// (captcha challenge, rate limit, or empty upstream output). When an enabled
+// account accumulates accountErrorEvictThreshold such errors it is
+// auto-disabled and removed from the pool. Errors on already-disabled
+// accounts are ignored, so zombie failures from in-flight requests cannot
+// re-evict an account that was disabled or evicted in the meantime.
+func (r *Resolver) NoteAccountError(accountID string) {
+	if r == nil || r.Store == nil || strings.TrimSpace(accountID) == "" {
+		return
+	}
+	if acc, ok := r.Store.FindAccount(accountID); ok && !acc.IsEnabled() {
+		return
+	}
+	r.mu.Lock()
+	r.accountErrors[accountID]++
+	count := r.accountErrors[accountID]
+	r.mu.Unlock()
+	if count < accountErrorEvictThreshold {
+		return
+	}
+	r.evictAccountFromPool(accountID, "error_count")
+}
+
+func (r *Resolver) clearAccountErrors(accountID string) {
+	if strings.TrimSpace(accountID) == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.accountErrors, accountID)
+}
+
 // reenableIfUnbanned restores an account that was auto-disabled with reason
 // "banned" once a fresh login shows the mute is no longer active. Manual
 // disables and already-enabled accounts are left untouched.
@@ -476,6 +547,14 @@ func (r *Resolver) RefreshToken(ctx context.Context, a *RequestAuth) bool {
 	// login attempt. Concurrent refreshes are deduped by the login flight.
 	if err := r.loginAndPersist(ctx, a); err != nil {
 		config.Logger.Error("[refresh_token] failed", "account", a.AccountID, "error", err)
+		// A failed refresh means the account can no longer authenticate
+		// itself, so it is evicted from the pool immediately. Caller-side
+		// cancellations are exempt: a cancelled follower of a login flight
+		// can observe ctx.Err() while the leader's login still succeeds,
+		// and evicting then would drop a healthy account.
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			r.evictAccountFromPool(a.AccountID, "refresh_failed")
+		}
 		return false
 	}
 	return true
@@ -565,6 +644,17 @@ func (a *RequestAuth) MarkTokenInvalid() {
 		return
 	}
 	a.resolver.MarkTokenInvalid(a)
+}
+
+// NoteAccountError records one upstream error attributed to the leased
+// account. The shared failure policy (completionruntime) calls this for
+// account-level failures (captcha challenge, rate limit, empty upstream
+// output); two such errors evict the account from the pool.
+func (a *RequestAuth) NoteAccountError() {
+	if a == nil || a.resolver == nil {
+		return
+	}
+	a.resolver.NoteAccountError(a.AccountID)
 }
 
 func (r *Resolver) Release(a *RequestAuth) {

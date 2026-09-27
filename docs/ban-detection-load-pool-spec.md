@@ -82,7 +82,7 @@
    - 语义：`enabled == true` 表示账号可被负载池分配；`enabled == false` 表示账号被禁用，**不被负载池分配请求**。
    - 缺省：字段缺失或 `null` 时按 `true` 处理（向后兼容，旧账号默认启用）。
 2. **新增账号字段** `disabled_reason`（string，可选，JSON key `disabled_reason`）：
-   - 记录禁用原因，取值：空串（启用/无）、`"banned"`（因封禁自动禁用）、`"manual"`（运营手动禁用）。
+   - 记录禁用原因，取值：空串（启用/无）、`"banned"`（因封禁自动禁用）、`"manual"`（运营手动禁用）、`"refresh_failed"`（因令牌刷新失败自动禁用，见 R8）、`"error_count"`（因连续上游错误自动禁用，见 R8）。
    - 仅用于 WebUI 展示与审计，不参与分配判定；`enabled == false` 即硬性排除。
 3. **自动禁用**（封禁触发）：
    - 设置 `enabled = false`、`disabled_reason = "banned"`，同时保留并刷新封禁字段。
@@ -146,6 +146,23 @@ pool.queue = activeSet               // 分配仅从 activeSet 进行
 - `rebalance` 必须在池子锁内执行，并与 `Acquire*` 互斥；正在 in-flight 的请求不受影响（`inUse` 计数保留），仅影响后续新分配。
 - 被自动禁用的账号若有 in-flight 请求，允许其完成当前请求后自然释放（`Release` 已是空操作安全），不再接受新分配。
 
+### R8 — 错误驱逐（池内账号因错误下线）
+
+在封禁检测之外，账号池还有两条自动驱逐规则，均由 `auth.Resolver` 统一执行（`evictAccountFromPool`），驱逐动作与 R3.3 一致：设置 `enabled = false` 与对应 `disabled_reason`，保留配置与 token，立即从池中移除。
+
+1. **刷新失败驱逐**：托管账号的令牌刷新（`RefreshToken`，即重新登录）失败时，立即以 `disabled_reason = "refresh_failed"` 驱逐该账号。
+   - 例外：调用方主动取消（`context.Canceled` / `context.DeadlineExceeded`）不算失败——singleflight 登录合并下，被取消的跟随者可能观察到 `ctx.Err()` 而主登录实际成功，此时驱逐会误伤健康账号。
+   - 登录成功但发现账号被封（`errAccountBanned`）走 R3.3 的封禁路径（reason 保持 `"banned"`），不覆盖为 `"refresh_failed"`。
+2. **错误计数驱逐**：`auth.Resolver` 维护进程内计数 `accountErrors map[string]int`（与 `banRecheckedAt` 同生命周期）。共享失败策略（`completionruntime.FailurePolicy`）在以下账号级错误时调用 `RequestAuth.NoteAccountError()` 计数：
+   - 验证码挑战（`FailureCaptchaRequired`）与限流（`FailureRateLimited`）；
+   - 上游空输出（`HandleUpstreamUnavailable`，assistantturn code `upstream_unavailable`）。
+   同一启用账号累计 **2 次**（`accountErrorEvictThreshold = 2`）即以 `disabled_reason = "error_count"` 驱逐。
+   - **不计数**：`FailureManagedUnauthorized`（托管 401）。401 且刷新成功属于正常令牌生命周期；刷新失败则由规则 1 立即驱逐，无需重复计数。
+   - 已禁用账号上的错误不计数（在途请求的「僵尸错误」不能把刚被禁用/驱逐的账号再次计入）。
+3. **计数清除**：驱逐时清零该账号计数；手动重新启用后从零开始（干净起跑线）。登录成功**不**清零计数——失败策略在复查登录之前就记录了错误，若按登录成功清零会让规则 2 失效。
+4. **无自动恢复**：`"refresh_failed"` 与 `"error_count"` 不在解封监控（`checkExpiredBans`）范围内，仅处理 `"banned"`。恢复方式：运营确认账号恢复后手动重新启用（Admin API/WebUI），手动启用会清空 `disabled_reason` 并清零计数。
+5. **幂等与优先级**：驱逐前检查账号当前状态；已禁用（含 `"banned"`、`"manual"`）则跳过，保留原 reason。
+
 ---
 
 ## 4. 数据模型变更
@@ -156,7 +173,7 @@ type Account struct {
     // ...现有字段不变...
     // 新增：
     Enabled        *bool  `json:"enabled,omitempty"`        // 缺省 true
-    DisabledReason string `json:"disabled_reason,omitempty"` // "" | "banned" | "manual"
+    DisabledReason string `json:"disabled_reason,omitempty"` // "" | "banned" | "manual" | "refresh_failed" | "error_count"
     // 现有封禁字段保持不变：
     // BanIsMuted / BanMuteUntil / BanStatus
 }
@@ -176,6 +193,7 @@ type RuntimeConfig struct {
 - `account.Pool` 增加 `activePoolSize int`（镜像 `RuntimeActivePoolSize()`）。
 - `account.Pool` 增加方法：`Rebalance()`（按 5.3 重算活跃/备用集合）与 `RemoveAccount(identifier string)`（封禁时即时剔除，等价于触发 rebalance）。
 - `auth.Resolver` 增加进程内 map：`lastBanRecheckAt map[string]time.Time` 与冷却读取方法（对齐现有 `tokenRefreshedAt` 的实现方式）。
+- `auth.Resolver` 增加进程内错误计数 `accountErrors map[string]int`（R8 规则 2），驱逐与手动启用时清零。
 
 ---
 

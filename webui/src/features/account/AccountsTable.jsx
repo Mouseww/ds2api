@@ -454,6 +454,16 @@ export default function AccountsTable({
                                                     {t('accountManager.disabledByBan')}
                                                 </span>
                                             )}
+                                            {!isEnabled && !isBanned && acc.disabled_reason === 'refresh_failed' && (
+                                                <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-500/10 text-red-500 border border-red-500/20">
+                                                    {t('accountManager.disabledByRefreshFailure')}
+                                                </span>
+                                            )}
+                                            {!isEnabled && !isBanned && acc.disabled_reason === 'error_count' && (
+                                                <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-500/10 text-red-500 border border-red-500/20">
+                                                    {t('accountManager.disabledByErrorCount')}
+                                                </span>
+                                            )}
                                         </div>
                                         <div
                                             className="font-medium truncate flex items-center gap-1.5 cursor-pointer hover:text-primary transition-colors group"

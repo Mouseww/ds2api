@@ -71,10 +71,15 @@ func NewFailurePolicy(a *auth.RequestAuth) *FailurePolicy {
 // Handle maps one typed upstream failure to a lease action:
 //
 //   - direct-token (non-managed) requests never mutate the lease and fail;
-//   - captcha / rate-limit failures re-check the ban state (cooldown-guarded
-//     login that also auto-disables banned accounts) and then switch;
+//   - captcha / rate-limit failures count toward the account's pool error
+//     budget (two such errors auto-disable the account), re-check the ban
+//     state (cooldown-guarded login that also auto-disables banned accounts)
+//     and then switch;
 //   - managed auth failures first re-check the ban (whose login refreshes the
-//     token), then explicitly refresh the token, and only then switch;
+//     token), then explicitly refresh the token, and only then switch. They
+//     do NOT count toward the error budget: a 401 whose refresh succeeds is
+//     the normal token lifecycle, and a refresh that fails evicts the
+//     account on its own;
 //   - anything else fails without touching the lease.
 //
 // Handle returns FailureActionFail for a nil policy or nil failure.
@@ -84,6 +89,7 @@ func (p *FailurePolicy) Handle(ctx context.Context, failure *dsclient.RequestFai
 	}
 	switch failure.Kind {
 	case dsclient.FailureCaptchaRequired, dsclient.FailureRateLimited:
+		p.a.NoteAccountError()
 		p.recheckOnce(ctx)
 		return p.switchOnce(ctx)
 	case dsclient.FailureManagedUnauthorized:
@@ -113,11 +119,13 @@ func (p *FailurePolicy) Handle(ctx context.Context, failure *dsclient.RequestFai
 // recovery ladder used for managed auth failures applies: ban re-check (its
 // login refreshes the token), explicit token refresh, then switch. It shares
 // the recheckDone/refreshDone budgets with Handle so the ladder never runs
-// twice for one request.
+// twice for one request. The empty output counts toward the account's pool
+// error budget (two such errors auto-disable the account).
 func (p *FailurePolicy) HandleUpstreamUnavailable(ctx context.Context) FailureAction {
 	if p == nil || p.a == nil || !p.a.UseConfigToken {
 		return FailureActionFail
 	}
+	p.a.NoteAccountError()
 	if !p.recheckDone {
 		p.recheckDone = true
 		if _, refreshed := p.a.RecheckBan(ctx); refreshed {
