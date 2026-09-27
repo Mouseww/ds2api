@@ -163,6 +163,16 @@ pool.queue = activeSet               // 分配仅从 activeSet 进行
 4. **无自动恢复**：`"refresh_failed"` 与 `"error_count"` 不在解封监控（`checkExpiredBans`）范围内，仅处理 `"banned"`。恢复方式：运营确认账号恢复后手动重新启用（Admin API/WebUI），手动启用会清空 `disabled_reason` 并清零计数。
 5. **幂等与优先级**：驱逐前检查账号当前状态；已禁用（含 `"banned"`、`"manual"`）则跳过，保留原 reason。
 
+### R9 — 登录限速闸门（按出口 IP 节流）
+
+**背景（线上实测）**：DeepSeek 对登录接口实施按出口 IP 的频控风控——同一共享代理出口在 ~8 秒内连续登录 ~5 次后，该出口 IP 上**所有后续登录**（无论 API 快速路径还是浏览器登录服务）都会被 `RISK_DEVICE_DETECTED` 拒绝；风控标记在登录尝试停止后 ~10 分钟才衰减，持续重试只会持续触发。表现为「检测连续 3 个账号后，之后的账号检测必定失败」。
+
+`internal/deepseek/client/login_gate.go` 实现按出口（每代理一个 key；无代理账号共用 `"direct"`）的登录闸门，`Client.Login` 入口统一经过：
+
+1. **最小间隔**：同一出口的登录至少间隔 `loginMinInterval`（默认 30s）。首个登录立即放行；并发登录按预留槽位排队等待（等待期间取消返回 `ctx.Err()`）。
+2. **风控冷却**：登录以 `RISK_DEVICE_DETECTED` 失败时，该出口进入 `loginRiskCooldown`（默认 10m）冷却期，期间所有登录**快速失败**并返回包装 `auth.ErrLoginThrottled` 的错误（信息含代理 ID 与剩余冷却时间，不含代理凭据），避免继续打 flagged 的 IP。
+3. **驱逐豁免**：`ErrLoginThrottled` 属于本地瞬时限流，账号本身健康，`RefreshToken` 对其不执行刷新失败驱逐（与 ctx 取消豁免同理）。
+
 ---
 
 ## 4. 数据模型变更

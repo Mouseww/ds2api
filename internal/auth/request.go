@@ -22,6 +22,13 @@ var (
 	ErrUnauthorized  = errors.New("unauthorized: missing auth token")
 	ErrNoAccount     = errors.New("no accounts configured or all accounts are busy")
 	errAccountBanned = errors.New("account is muted/banned by DeepSeek")
+
+	// ErrLoginThrottled marks a login rejected by the local per-egress login
+	// rate gate (spacing between logins, or the risk-control cooldown after
+	// a RISK_DEVICE_DETECTED rejection). It is a local, transient condition
+	// — the account itself is healthy — so RefreshToken must not evict on
+	// it. The deepseek client wraps this sentinel into its gate errors.
+	ErrLoginThrottled = errors.New("login throttled by local rate gate")
 )
 
 const (
@@ -548,11 +555,14 @@ func (r *Resolver) RefreshToken(ctx context.Context, a *RequestAuth) bool {
 	if err := r.loginAndPersist(ctx, a); err != nil {
 		config.Logger.Error("[refresh_token] failed", "account", a.AccountID, "error", err)
 		// A failed refresh means the account can no longer authenticate
-		// itself, so it is evicted from the pool immediately. Caller-side
-		// cancellations are exempt: a cancelled follower of a login flight
-		// can observe ctx.Err() while the leader's login still succeeds,
-		// and evicting then would drop a healthy account.
-		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		// itself, so it is evicted from the pool immediately. Two
+		// exemptions: caller-side cancellations (a cancelled follower of a
+		// login flight can observe ctx.Err() while the leader's login
+		// still succeeds) and local login throttling (the per-egress rate
+		// gate rejected the attempt to protect the shared IP — the account
+		// is healthy and a later refresh will succeed once the gate
+		// reopens).
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, ErrLoginThrottled) {
 			r.evictAccountFromPool(a.AccountID, "refresh_failed")
 		}
 		return false

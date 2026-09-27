@@ -28,6 +28,10 @@ type Client struct {
 
 	powCache *powChallengeCache
 
+	// loginGate paces logins per egress IP (see login_gate.go). Zero value
+	// ready to use.
+	loginGate loginGate
+
 	proxyClientsMu sync.RWMutex
 	proxyClients   map[string]requestClients
 }

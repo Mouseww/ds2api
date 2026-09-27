@@ -38,6 +38,43 @@ var loginDeviceRotationPause = time.Second
 var loginServiceHTTPClient = &http.Client{Timeout: 60 * time.Second}
 
 func (c *Client) Login(ctx context.Context, acc config.Account) (string, error) {
+	// Per-egress rate gate: DeepSeek flags an IP after several rapid
+	// logins through it, so logins sharing an egress are spaced out and a
+	// risk-control rejection puts the egress into cooldown. See login_gate.go.
+	key, label := c.loginGateKey(acc)
+	if err := c.loginGate.acquire(ctx, key, label); err != nil {
+		return "", err
+	}
+	token, err := c.loginFlow(ctx, acc)
+	if isRiskDeviceDetected(err) {
+		// The egress IP is now flagged; further attempts through it would
+		// only prolong the flag, so cool down instead of hammering.
+		c.loginGate.markRisk(key)
+		config.Logger.Warn(
+			"[login_gate] risk-control rejection, entering cooldown",
+			"egress", label,
+			"account", acc.Identifier(),
+			"cooldown", loginRiskCooldown,
+		)
+	}
+	return token, err
+}
+
+// loginGateKey returns the gate key for the account's egress plus a
+// log-safe label. Accounts on the same proxy share one key (their logins
+// leave through the same IP). The key embeds proxy credentials, so only the
+// label (proxy ID or "direct") may appear in logs or error messages.
+func (c *Client) loginGateKey(acc config.Account) (key, label string) {
+	proxyCfg, ok := c.resolveProxyForAccount(acc)
+	if !ok {
+		return "direct", "direct"
+	}
+	return proxyCacheKey(proxyCfg), proxyCfg.ID
+}
+
+// loginFlow performs the actual login: API fast path with the stored
+// fingerprint, browser login service, or fingerprint rotation.
+func (c *Client) loginFlow(ctx context.Context, acc config.Account) (string, error) {
 	// Fast path: the account carries a device fingerprint persisted from a
 	// previous browser login (device_id matches the server-issued
 	// thumbcache). Try the plain API login first — it completes in ~2s

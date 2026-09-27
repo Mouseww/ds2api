@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"ds2api/internal/account"
@@ -102,6 +103,35 @@ func TestRefreshTokenContextCancelDoesNotEvict(t *testing.T) {
 	}
 	if !acc.IsEnabled() {
 		t.Fatal("expected cancelled refresh not to evict the account")
+	}
+	if acc.DisabledReason != "" {
+		t.Fatalf("expected no disabled_reason, got %q", acc.DisabledReason)
+	}
+	if !poolMembers(t, pool)["acc1@example.com"] {
+		t.Fatal("expected account to stay in the pool")
+	}
+}
+
+// TestRefreshTokenThrottleDoesNotEvict guards the throttle exemption of
+// eviction rule 1: a login rejected by the local per-egress rate gate
+// (ErrLoginThrottled) is transient and local — the account is healthy — so
+// it must not evict the account or drop it from the pool.
+func TestRefreshTokenThrottleDoesNotEvict(t *testing.T) {
+	resolver, store, pool := newEvictTestResolver(t, func(_ context.Context, _ config.Account) (string, error) {
+		return "", fmt.Errorf("egress proxy-1 in risk-control cooldown, retry in 9m59s: %w", ErrLoginThrottled)
+	})
+	a := &RequestAuth{UseConfigToken: true, AccountID: "acc1@example.com", resolver: resolver}
+
+	if resolver.RefreshToken(context.Background(), a) {
+		t.Fatal("expected refresh to fail while throttled")
+	}
+
+	acc, ok := store.FindAccount("acc1@example.com")
+	if !ok {
+		t.Fatal("expected account to exist")
+	}
+	if !acc.IsEnabled() {
+		t.Fatal("expected throttled refresh not to evict the account")
 	}
 	if acc.DisabledReason != "" {
 		t.Fatalf("expected no disabled_reason, got %q", acc.DisabledReason)
