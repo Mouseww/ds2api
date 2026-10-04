@@ -162,12 +162,16 @@ func toAccount(m map[string]any) config.Account {
 	email := fieldString(m, "email")
 	mobile := config.NormalizeMobileForStorage(fieldString(m, "mobile"))
 	return config.Account{
-		Name:     fieldString(m, "name"),
-		Remark:   fieldString(m, "remark"),
-		Email:    email,
-		Mobile:   mobile,
-		Password: fieldString(m, "password"),
-		ProxyID:  fieldString(m, "proxy_id"),
+		Name:       fieldString(m, "name"),
+		Remark:     fieldString(m, "remark"),
+		Email:      email,
+		Mobile:     mobile,
+		Password:   fieldString(m, "password"),
+		Token:      fieldString(m, "token"),
+		UserID:     fieldString(m, "user_id"),
+		DeviceID:   fieldString(m, "device_id"),
+		DeviceUUID: fieldString(m, "x_device_id"),
+		ProxyID:    fieldString(m, "proxy_id"),
 	}
 }
 
@@ -323,6 +327,10 @@ func normalizeAccountForStorage(acc config.Account) config.Account {
 	acc.Remark = strings.TrimSpace(acc.Remark)
 	acc.Email = strings.TrimSpace(acc.Email)
 	acc.Mobile = config.NormalizeMobileForStorage(acc.Mobile)
+	acc.Token = strings.TrimSpace(acc.Token)
+	acc.UserID = strings.TrimSpace(acc.UserID)
+	acc.DeviceID = strings.TrimSpace(acc.DeviceID)
+	acc.DeviceUUID = strings.TrimSpace(acc.DeviceUUID)
 	acc.ProxyID = strings.TrimSpace(acc.ProxyID)
 	return acc
 }

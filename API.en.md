@@ -996,6 +996,89 @@ An empty `proxy_id` unbinds; an unknown proxy returns 400 without applying any c
 {"success": true, "updated": 2, "missing": [], "proxy_id": "proxy_xxx", "total_accounts": 3}
 ```
 
+### `POST /admin/accounts/batch-import`
+
+Bulk account upload endpoint for external callers (scripts, migration tooling). Writes many accounts and their login credentials in a single request. Requires admin auth (`Authorization: Bearer <admin_token>`).
+
+**Request body**:
+
+```json
+{
+  "mode": "skip",
+  "accounts": [
+    {
+      "email": "user@example.com",
+      "password": "pwd",
+      "token": "...",
+      "user_id": "...",
+      "device_id": "...",
+      "x_device_id": "..."
+    },
+    {
+      "mobile": "13800138000",
+      "password": "pwd2"
+    }
+  ]
+}
+```
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `mode` | string | no | Collision strategy: `skip` (default; keep existing), `overwrite` (replace identity/credential fields; preserves `enabled` / `disabled_reason` / `ban_*` runtime state), `error` (report collisions in `results`, do not modify) |
+| `accounts[].email` | string | one of `email`/`mobile` | Email, one of the primary identifiers |
+| `accounts[].mobile` | string | one of `email`/`mobile` | Mobile number |
+| `accounts[].password` | string | no | Login password |
+| `accounts[].token` | string | no | Existing token (skip login) |
+| `accounts[].user_id` | string | no | DeepSeek user id |
+| `accounts[].device_id` | string | no | Device fingerprint |
+| `accounts[].x_device_id` | string | no | Device UUID |
+| `accounts[].name` | string | no | Display name |
+| `accounts[].remark` | string | no | Remark |
+| `accounts[].proxy_id` | string | no | Bound proxy id; must exist |
+
+Up to 5000 entries per call. All valid entries are written in a single atomic update; any per-entry collision only affects that entry, it does not roll back the others.
+
+**Response** (HTTP 200):
+
+```json
+{
+  "success": true,
+  "mode": "skip",
+  "created": 2,
+  "updated": 0,
+  "skipped": 0,
+  "errors": 0,
+  "total_accounts": 12,
+  "results": [
+    {"index": 0, "identifier": "user@example.com", "status": "created"},
+    {"index": 1, "identifier": "13800138000", "status": "created"}
+  ]
+}
+```
+
+`results[].status` is one of: `created` (new), `updated` (overwrote in overwrite mode), `skipped` (collision in skip mode), `error` (this entry failed validation or collision; see `reason`). `success = (errors == 0)`.
+
+**curl example**:
+
+```bash
+curl -X POST "http://127.0.0.1:5001/admin/accounts/batch-import" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "mode": "skip",
+    "accounts": [
+      {
+        "email": "user@example.com",
+        "password": "pwd",
+        "token": "R3dc+TP1l5vV5ixP4vwO/KnREioKuORNpW18ZPkLl9hkBGmCzpCd/UvIzZYUOvEt",
+        "user_id": "9c7377d8-90a0-44b8-800a-9a4879ac09fc",
+        "device_id": "...",
+        "x_device_id": "2ffda7a9-9006-4dbe-ac49-f49825c47726"
+      }
+    ]
+  }'
+```
+
 ### `GET /admin/queue/status`
 
 ```json
@@ -1091,13 +1174,22 @@ The current handler returns the Chinese literal `删除成功` on success.
 
 Batch import keys and accounts.
 
+Each item in the `accounts` array accepts the following (all optional) fields: `name`, `remark`, `email`, `mobile`, `password`, `token`, `user_id`, `device_id`, `x_device_id`, `proxy_id`. At least one of `email` / `mobile` is required for the account to be addressable by later management APIs (otherwise it is dropped).
+
 **Request**:
 
 ```json
 {
   "keys": ["k1", "k2"],
   "accounts": [
-    {"email": "user@example.com", "password": "pwd", "token": ""}
+    {
+      "email": "user@example.com",
+      "password": "pwd",
+      "token": "",
+      "user_id": "",
+      "device_id": "",
+      "x_device_id": ""
+    }
   ]
 }
 ```

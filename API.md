@@ -155,6 +155,7 @@ Gemini 兼容客户端还可以使用 `x-goog-api-key`、`?key=` 或 `?api_key=`
 | POST | `/admin/accounts/batch-delete` | Admin | 批量删除账号 |
 | POST | `/admin/accounts/batch-status` | Admin | 批量启用/禁用账号 |
 | POST | `/admin/accounts/batch-proxy` | Admin | 批量绑定/解绑代理 |
+| POST | `/admin/accounts/batch-import` | Admin | 批量上传账号（含 token/设备指纹） |
 | GET | `/admin/queue/status` | Admin | 账号队列状态 |
 | POST | `/admin/accounts/test` | Admin | 测试单个账号 |
 | POST | `/admin/accounts/test-all` | Admin | 测试全部账号 |
@@ -1007,6 +1008,89 @@ data: {"type":"message_stop"}
 {"success": true, "updated": 2, "missing": [], "proxy_id": "proxy_xxx", "total_accounts": 3}
 ```
 
+### `POST /admin/accounts/batch-import`
+
+面向外部调用方（脚本 / 迁移工具）的批量账号上传接口，一次请求写入多个账号及其登录凭据。需要 Admin 鉴权（`Authorization: Bearer <admin_token>`）。
+
+**请求体**：
+
+```json
+{
+  "mode": "skip",
+  "accounts": [
+    {
+      "email": "user@example.com",
+      "password": "pwd",
+      "token": "...",
+      "user_id": "...",
+      "device_id": "...",
+      "x_device_id": "..."
+    },
+    {
+      "mobile": "13800138000",
+      "password": "pwd2"
+    }
+  ]
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `mode` | string | 否 | 冲突处理策略：`skip`（默认，保留现有账号不动）、`overwrite`（用导入值覆盖身份/凭据字段，保留 `enabled` / `disabled_reason` / `ban_*` 等运行时状态）、`error`（冲突条目在 `results` 中报错，不修改） |
+| `accounts[].email` | string | 与 `mobile` 至少一项 | 邮箱，作为账号主标识之一 |
+| `accounts[].mobile` | string | 与 `email` 至少一项 | 手机号 |
+| `accounts[].password` | string | 否 | 登录密码 |
+| `accounts[].token` | string | 否 | 已有 token（绕过登录直接用） |
+| `accounts[].user_id` | string | 否 | DeepSeek user id |
+| `accounts[].device_id` | string | 否 | 设备指纹 |
+| `accounts[].x_device_id` | string | 否 | 设备 UUID |
+| `accounts[].name` | string | 否 | 显示名 |
+| `accounts[].remark` | string | 否 | 备注 |
+| `accounts[].proxy_id` | string | 否 | 绑定的代理 ID，必须已存在 |
+
+单次最多 5000 条。所有合法条目在一次原子更新里写入；任一冲突条目只影响它自己，不会回滚其它条目。
+
+**响应**（HTTP 200）：
+
+```json
+{
+  "success": true,
+  "mode": "skip",
+  "created": 2,
+  "updated": 0,
+  "skipped": 0,
+  "errors": 0,
+  "total_accounts": 12,
+  "results": [
+    {"index": 0, "identifier": "user@example.com", "status": "created"},
+    {"index": 1, "identifier": "13800138000", "status": "created"}
+  ]
+}
+```
+
+`results[].status` 取值：`created`（新建）、`updated`（overwrite 模式覆盖）、`skipped`（skip 模式遇到冲突）、`error`（该条目校验或冲突失败，`reason` 给出原因）。`success = (errors == 0)`。
+
+**curl 示例**：
+
+```bash
+curl -X POST "http://127.0.0.1:5001/admin/accounts/batch-import" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "mode": "skip",
+    "accounts": [
+      {
+        "email": "user@example.com",
+        "password": "pwd",
+        "token": "R3dc+TP1l5vV5ixP4vwO/KnREioKuORNpW18ZPkLl9hkBGmCzpCd/UvIzZYUOvEt",
+        "user_id": "9c7377d8-90a0-44b8-800a-9a4879ac09fc",
+        "device_id": "...",
+        "x_device_id": "2ffda7a9-9006-4dbe-ac49-f49825c47726"
+      }
+    ]
+  }'
+```
+
 ### `GET /admin/queue/status`
 
 ```json
@@ -1101,13 +1185,22 @@ data: {"type":"message_stop"}
 
 批量导入 keys 与 accounts。
 
+`accounts` 数组中的每项支持以下字段（均可选）：`name`、`remark`、`email`、`mobile`、`password`、`token`、`user_id`、`device_id`、`x_device_id`、`proxy_id`。其中 `email` / `mobile` 至少需要一个，账号才能被后续管理接口寻址（否则会被丢弃）。
+
 **请求**：
 
 ```json
 {
   "keys": ["k1", "k2"],
   "accounts": [
-    {"email": "user@example.com", "password": "pwd", "token": ""}
+    {
+      "email": "user@example.com",
+      "password": "pwd",
+      "token": "",
+      "user_id": "",
+      "device_id": "",
+      "x_device_id": ""
+    }
   ]
 }
 ```

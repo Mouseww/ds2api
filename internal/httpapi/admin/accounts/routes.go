@@ -17,6 +17,7 @@ func RegisterRoutes(r chi.Router, h *Handler) {
 	r.Post("/accounts/batch-delete", h.batchDeleteAccounts)
 	r.Post("/accounts/batch-status", h.batchUpdateStatus)
 	r.Post("/accounts/batch-proxy", h.batchUpdateProxy)
+	r.Post("/accounts/batch-import", h.batchImportAccounts)
 	r.Get("/queue/status", h.queueStatus)
 	r.Post("/accounts/test", h.testSingleAccount)
 	r.Post("/accounts/test-all", h.testAllAccounts)

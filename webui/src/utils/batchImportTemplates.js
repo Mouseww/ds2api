@@ -13,9 +13,9 @@ export function getBatchImportTemplates(t) {
             config: {
                 keys: ['your-api-key'],
                 accounts: [
-                    { email: 'account1@example.com', password: 'pass1', token: '' },
-                    { email: 'account2@example.com', password: 'pass2', token: '' },
-                    { email: 'account3@example.com', password: 'pass3', token: '' },
+                    { email: 'account1@example.com', password: 'pass1', token: '', user_id: '', device_id: '', x_device_id: '' },
+                    { email: 'account2@example.com', password: 'pass2' },
+                    { email: 'account3@example.com', password: 'pass3' },
                 ],
             },
         },

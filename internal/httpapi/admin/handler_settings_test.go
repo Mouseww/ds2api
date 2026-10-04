@@ -719,6 +719,51 @@ func TestBatchImportUpgradesLegacyAPIKeys(t *testing.T) {
 	}
 }
 
+func TestBatchImportPreservesAccountCredentials(t *testing.T) {
+	h := newAdminTestHandler(t, `{
+		"keys":["legacy"],
+		"accounts":[]
+	}`)
+
+	payload := map[string]any{
+		"accounts": []any{
+			map[string]any{
+				"email":       "import@example.com",
+				"password":    "pwd",
+				"token":       "imported-token",
+				"user_id":     "uid-123",
+				"device_id":   "dev-abc",
+				"x_device_id": "uuid-xyz",
+			},
+		},
+	}
+	b, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPost, "/admin/import", bytes.NewReader(b))
+	rec := httptest.NewRecorder()
+	h.batchImport(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	snap := h.Store.Snapshot()
+	if len(snap.Accounts) != 1 {
+		t.Fatalf("expected one account, got %d", len(snap.Accounts))
+	}
+	acc := snap.Accounts[0]
+	if acc.Token != "imported-token" {
+		t.Fatalf("token not preserved: %#v", acc)
+	}
+	if acc.UserID != "uid-123" {
+		t.Fatalf("user_id not preserved: %#v", acc)
+	}
+	if acc.DeviceID != "dev-abc" {
+		t.Fatalf("device_id not preserved: %#v", acc)
+	}
+	if acc.DeviceUUID != "uuid-xyz" {
+		t.Fatalf("x_device_id not preserved: %#v", acc)
+	}
+}
+
 func TestConfigImportAppliesTokenRefreshInterval(t *testing.T) {
 	h := newAdminTestHandler(t, `{"keys":["k1"]}`)
 
