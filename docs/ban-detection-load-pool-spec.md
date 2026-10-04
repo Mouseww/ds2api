@@ -191,9 +191,10 @@ pool.queue = activeSet               // 分配仅从 activeSet 进行
 `internal/auth/request_token_keeper.go` 的后台巡检（`Resolver.StartPoolTokenKeeper`，`internal/server/router.go` 在 `pool.Rebalance()` 之后启动，保证首轮看到的是经过用量过滤的活跃队列）：
 
 1. **巡检节奏**：启动时立即执行一轮（新启动的服务不用等满一个间隔就完成活跃池供 token），之后每 `poolTokenKeepInterval`（默认 5m，环境变量 `DS2API_TOKEN_KEEP_INTERVAL` 覆盖，Go duration 语法如 `90s`；`off`/`disabled`/`0` 关闭；非法值回退默认并告警）扫一遍 `Pool.ActiveAccounts()`（活跃队列快照，不含 standby——为 585 个备用账号批量登录是风控灾难，活跃池才有流量需要）。
-2. **每账号策略**：跳过已禁用/封禁账号；token 刚刷新过（流量驱动登录、unban monitor 或 keeper 自身，间隔内）直接跳过；有存量 token 先用只读 `GetSessionCountForToken` 探测（`Resolver.TokenProbe`，走账号自己的代理出口，不创建会话、不消耗登录）——探测通过即跳过；**连续两次**探测被拒（`keeperFailureThreshold = 2`，与 R8 错误驱逐阈值同理：单次被拒可能是瞬时网络错误）才判定 token 失效并重新登录；无 token 直接登录补发。
-3. **失败退避**：登录失败（密码错误、验证码、上游错误）连续两次后，该账号暂停 `keeperFailurePause`（默认 1h）再重试——永久损坏的账号表现为周期性告警而非登录风暴；`ErrLoginThrottled`（本地闸门限流）与 ctx 取消不计入失败、不暂停，下轮照常重试。keeper 自身**从不驱逐**账号——驱逐仍由失败策略（`refresh_failed`/`error_count`）与封禁检测负责。
+2. **每账号策略**：跳过已禁用/封禁账号；token 刚刷新过（流量驱动登录、unban monitor 或 keeper 自身，间隔内）直接跳过；**已过期或即将过期的 token 跳过探测、立即重新登录**——DeepSeek token 是 JWT，中段 base64url 载荷的 `exp` 声明即过期时间（`tokenExpiry` 只解码过期时间、不校验签名；无法解码的 token 回退探测路径），`exp` 已过或在下一轮巡检间隔内到期即判定需要刷新，保证默认节奏下池内 token 不会在服务中过期；其余有存量 token 先用只读 `GetSessionCountForToken` 探测（`Resolver.TokenProbe`，走账号自己的代理出口，不创建会话、不消耗登录）——探测通过即跳过；**连续两次**探测被拒（`keeperFailureThreshold = 2`，与 R8 错误驱逐阈值同理：单次被拒可能是瞬时网络错误）才判定 token 失效并重新登录；无 token 直接登录补发。
+3. **连续刷新失败驱逐（更换账号）**：token 刷新（重新登录）**连续两次**失败（密码错误、验证码、上游错误）后，该账号以 `refresh_failed` 驱逐出活跃池——自动禁用并从池中移除，standby 账号顶替其流量位置（更换账号），仅手动重新启用可恢复（同 R8.4）；`ErrLoginThrottled`（本地闸门限流）与 ctx 取消不计入失败、不驱逐，下轮照常重试；探测通过会同时重置刷新失败与探测失败计数（证明账号健康、此前失败为瞬时）。驱逐时清零该账号的 keeper 失败计数，手动重新启用后从零开始。
 4. **登录安全**：所有登录走共享 `performLogin` singleflight（与流量驱动登录、unban monitor 合并同账号并发）与 R9 按出口闸门（30s 间隔、风控冷却），keeper 不可能绕过或加剧限速。
+5. **token 持久化**：登录获得的 token 通过 `Store.UpdateAccountToken` 写回 config.json（`Save`/`saveLocked` 不再剥离 token 字段），重启后直接复用存量 token（探测通过即免登录），避免每次重启对活跃池集中重登。泄露敏感面仍剥离 token：`ExportJSONAndBase64` 导出、admin API 账号快照、Vercel 同步、env 引导写盘；`DS2API_CONFIG_JSON` 环境变量加载侧也剥离（环境变量不是 token 存储介质）。
 
 ---
 

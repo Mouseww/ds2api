@@ -5,6 +5,7 @@ import (
 
 	"ds2api/internal/auth"
 	dsclient "ds2api/internal/deepseek/client"
+	"ds2api/internal/sse"
 )
 
 // CALL-SITE MAP — where "failure → lease action" used to live before this
@@ -60,6 +61,11 @@ type FailurePolicy struct {
 
 	recheckDone bool
 	refreshDone bool
+	// One-shot budgets for the typed JSON-envelope rejections
+	// (see HandleUpstreamBodyError).
+	mutedDone               bool
+	powDone                 bool
+	upstreamUnavailableDone bool
 }
 
 // NewFailurePolicy returns a request-scoped failure policy for the given
@@ -139,6 +145,57 @@ func (p *FailurePolicy) HandleUpstreamUnavailable(ctx context.Context) FailureAc
 		}
 	}
 	return p.switchOnce(ctx)
+}
+
+// HandleUpstreamBodyError maps one typed JSON-envelope rejection (HTTP 200
+// with a plain-JSON error body instead of an SSE stream; codes from
+// sse.SniffJSONErrorBody) to a lease action:
+//
+//   - "upstream_account_muted": the account is unusable until the mute
+//     expires. Record the ban window on the account (the unban monitor
+//     auto-recovers it after expiry) and switch. No synthetic retry can
+//     help, and the mute is deterministic, so it does not count toward the
+//     pool error budget.
+//   - "upstream_invalid_pow": the proof-of-work challenge was rejected —
+//     often a stale-challenge race. Retry the same account once with a
+//     fresh PoW; if that already happened, fall through to the
+//     upstream-unavailable ladder.
+//   - anything else: the upstream-unavailable ladder (ban re-check → token
+//     refresh → switch), one-shot per request.
+//
+// Each typed path is one-shot per request; later occurrences fail.
+func (p *FailurePolicy) HandleUpstreamBodyError(ctx context.Context, code string, muteUntil float64) FailureAction {
+	if p == nil || p.a == nil || !p.a.UseConfigToken {
+		return FailureActionFail
+	}
+	switch code {
+	case sse.UpstreamCodeAccountMuted:
+		if p.mutedDone {
+			return FailureActionFail
+		}
+		p.mutedDone = true
+		p.a.MarkAccountMuted(muteUntil)
+		return p.switchOnce(ctx)
+	case sse.UpstreamCodeInvalidPow:
+		if p.powDone {
+			return p.handleUpstreamUnavailableOnce(ctx)
+		}
+		p.powDone = true
+		return FailureActionRetrySameAccount
+	default:
+		return p.handleUpstreamUnavailableOnce(ctx)
+	}
+}
+
+// handleUpstreamUnavailableOnce is the one-shot form of
+// HandleUpstreamUnavailable used by the typed JSON-envelope paths, which do
+// not keep their own attempted-flags.
+func (p *FailurePolicy) handleUpstreamUnavailableOnce(ctx context.Context) FailureAction {
+	if p.upstreamUnavailableDone {
+		return FailureActionFail
+	}
+	p.upstreamUnavailableDone = true
+	return p.HandleUpstreamUnavailable(ctx)
 }
 
 func (p *FailurePolicy) recheckOnce(ctx context.Context) {

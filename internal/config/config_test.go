@@ -119,6 +119,82 @@ func TestLoadStorePreservesFileBackedTokensForRuntime(t *testing.T) {
 	}
 }
 
+func TestStorePersistsAccountTokensToFile(t *testing.T) {
+	tmp, err := os.CreateTemp(t.TempDir(), "config-*.json")
+	if err != nil {
+		t.Fatalf("create temp config: %v", err)
+	}
+	path := tmp.Name()
+	if _, err := tmp.WriteString(`{
+		"accounts":[{"email":"u@example.com","password":"p"}]
+	}`); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+	_ = tmp.Close()
+
+	t.Setenv("DS2API_CONFIG_JSON", "")
+	t.Setenv("DS2API_CONFIG_PATH", path)
+
+	store := LoadStore()
+	if err := store.UpdateAccountToken("u@example.com", "runtime-token"); err != nil {
+		t.Fatalf("update account token: %v", err)
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read persisted config: %v", err)
+	}
+	if !strings.Contains(string(content), `"token": "runtime-token"`) {
+		t.Fatalf("expected account token persisted to config file, got: %s", content)
+	}
+
+	reloaded := LoadStore()
+	accounts := reloaded.Accounts()
+	if len(accounts) != 1 {
+		t.Fatalf("expected 1 account after reload, got %d", len(accounts))
+	}
+	if accounts[0].Token != "runtime-token" {
+		t.Fatalf("expected persisted token reused after reload, got %q", accounts[0].Token)
+	}
+}
+
+func TestExportJSONAndBase64StripsAccountTokens(t *testing.T) {
+	tmp, err := os.CreateTemp(t.TempDir(), "config-*.json")
+	if err != nil {
+		t.Fatalf("create temp config: %v", err)
+	}
+	path := tmp.Name()
+	if _, err := tmp.WriteString(`{
+		"accounts":[{"email":"u@example.com","password":"p"}]
+	}`); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+	_ = tmp.Close()
+
+	t.Setenv("DS2API_CONFIG_JSON", "")
+	t.Setenv("DS2API_CONFIG_PATH", path)
+
+	store := LoadStore()
+	if err := store.UpdateAccountToken("u@example.com", "runtime-token"); err != nil {
+		t.Fatalf("update account token: %v", err)
+	}
+
+	jsonStr, b64, err := store.ExportJSONAndBase64()
+	if err != nil {
+		t.Fatalf("export config: %v", err)
+	}
+	if strings.Contains(jsonStr, "runtime-token") {
+		t.Fatal("expected export JSON to strip account tokens")
+	}
+	decoded, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		t.Fatalf("decode export base64: %v", err)
+	}
+	if strings.Contains(string(decoded), "runtime-token") {
+		t.Fatal("expected export base64 to strip account tokens")
+	}
+}
+
 func TestLoadStoreIgnoresLegacyConfigJSONEnv(t *testing.T) {
 	tmp, err := os.CreateTemp(t.TempDir(), "config-*.json")
 	if err != nil {

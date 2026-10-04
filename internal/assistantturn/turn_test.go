@@ -2,6 +2,7 @@ package assistantturn
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 
 	"ds2api/internal/promptcompat"
@@ -145,5 +146,62 @@ func TestFinalizeTurnContentFilterOutcome(t *testing.T) {
 	outcome := FinalizeTurn(turn, FinalizeOptions{})
 	if !outcome.ShouldFail || outcome.Error == nil || outcome.Error.Code != "content_filter" {
 		t.Fatalf("expected content filter failure, got %#v", outcome)
+	}
+}
+
+func TestBuildTurnFromCollectedTypedBodyErrorWins(t *testing.T) {
+	turn := BuildTurnFromCollected(sse.CollectResult{
+		BodyError: &sse.UpstreamBodyError{
+			Code:      sse.UpstreamCodeAccountMuted,
+			Message:   "Upstream account is muted and returned no output.",
+			Status:    http.StatusForbidden,
+			MuteUntil: 1790939390.395,
+		},
+	}, BuildOptions{})
+	if turn.Error == nil {
+		t.Fatalf("expected typed body error, got nil")
+	}
+	if turn.Error.Code != sse.UpstreamCodeAccountMuted {
+		t.Fatalf("code = %q, want %q", turn.Error.Code, sse.UpstreamCodeAccountMuted)
+	}
+	if turn.Error.Status != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", turn.Error.Status)
+	}
+	if turn.Error.MuteUntil != 1790939390.395 {
+		t.Fatalf("mute_until = %v, want 1790939390.395", turn.Error.MuteUntil)
+	}
+	if turn.StopReason != StopReasonError {
+		t.Fatalf("stop reason = %q, want %q", turn.StopReason, StopReasonError)
+	}
+}
+
+func TestBuildTurnFromCollectedInStreamErrorMessageWithoutText(t *testing.T) {
+	turn := BuildTurnFromCollected(sse.CollectResult{
+		ErrorMessage: "upstream_broken model unavailable",
+	}, BuildOptions{})
+	if turn.Error == nil {
+		t.Fatalf("expected upstream error, got nil")
+	}
+	if turn.Error.Code != sse.UpstreamCodeError {
+		t.Fatalf("code = %q, want %q", turn.Error.Code, sse.UpstreamCodeError)
+	}
+	if turn.Error.Status != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", turn.Error.Status)
+	}
+	if !strings.Contains(turn.Error.Message, "upstream_broken") {
+		t.Fatalf("message = %q, want the upstream error surfaced", turn.Error.Message)
+	}
+}
+
+func TestBuildTurnFromCollectedInStreamErrorMessageKeepsPartialText(t *testing.T) {
+	turn := BuildTurnFromCollected(sse.CollectResult{
+		Text:         "partial answer",
+		ErrorMessage: "upstream_broken model unavailable",
+	}, BuildOptions{})
+	if turn.Error != nil {
+		t.Fatalf("partial text must still win over the in-stream error, got %#v", turn.Error)
+	}
+	if turn.Text != "partial answer" {
+		t.Fatalf("text = %q, want %q", turn.Text, "partial answer")
 	}
 }

@@ -1,6 +1,7 @@
 package sse
 
 import (
+	"io"
 	"net/http"
 	"strings"
 
@@ -17,6 +18,15 @@ type CollectResult struct {
 	ContentFilter         bool
 	CitationLinks         map[int]string
 	ResponseMessageID     int
+
+	// BodyError is set when the response body was not an SSE stream but a
+	// plain-JSON error envelope (see SniffJSONErrorBody); Text/Thinking are
+	// empty in that case.
+	BodyError *UpstreamBodyError
+	// ErrorMessage carries the raw in-stream error payload when the stream
+	// stopped on a data:{"error":...} line (previously dropped, which made
+	// such streams look like empty output).
+	ErrorMessage string
 }
 
 // CollectStream fully consumes a DeepSeek SSE response and separates
@@ -29,18 +39,33 @@ func CollectStream(resp *http.Response, thinkingEnabled bool, closeBody bool) Co
 	if closeBody {
 		defer func() { _ = resp.Body.Close() }()
 	}
+	// DeepSeek occasionally answers a completion request with HTTP 200 and a
+	// plain-JSON error envelope instead of an SSE stream (INVALID_POW_RESPONSE,
+	// "user is muted"). Sniff for that first so callers see the real cause
+	// instead of an empty stream misreported as "no output". The sniff is
+	// gated on the JSON content type so it never reads ahead of a healthy
+	// SSE stream.
+	body := io.Reader(resp.Body)
+	if JSONEnvelopeContentType(resp.Header.Get("Content-Type")) {
+		replay, bodyErr := SniffJSONErrorBody(resp.Body)
+		if bodyErr != nil {
+			return CollectResult{BodyError: bodyErr}
+		}
+		body = replay
+	}
 	text := strings.Builder{}
 	thinking := strings.Builder{}
 	toolDetectionThinking := strings.Builder{}
 	contentFilter := false
 	stopped := false
+	errorMessage := ""
 	collector := newCitationLinkCollector()
 	responseMessageID := 0
 	currentType := "text"
 	if thinkingEnabled {
 		currentType = "thinking"
 	}
-	_ = dsprotocol.ScanSSELines(resp, func(line []byte) bool {
+	_ = dsprotocol.ScanSSELinesReader(body, func(line []byte) bool {
 		chunk, done, parsed := ParseDeepSeekSSELine(line)
 		if parsed && !done {
 			collector.ingestChunk(chunk)
@@ -60,6 +85,9 @@ func CollectStream(resp *http.Response, thinkingEnabled bool, closeBody bool) Co
 		if result.Stop {
 			if result.ContentFilter {
 				contentFilter = true
+			}
+			if result.ErrorMessage != "" && errorMessage == "" {
+				errorMessage = result.ErrorMessage
 			}
 			// Keep scanning to collect late-arriving citation metadata lines
 			// that can appear after response/status=FINISHED, but stop as soon
@@ -89,6 +117,7 @@ func CollectStream(resp *http.Response, thinkingEnabled bool, closeBody bool) Co
 		ContentFilter:         contentFilter,
 		CitationLinks:         collector.build(),
 		ResponseMessageID:     responseMessageID,
+		ErrorMessage:          errorMessage,
 	}
 }
 

@@ -1,6 +1,7 @@
 package assistantturn
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -31,6 +32,9 @@ type OutputError struct {
 	Status  int
 	Message string
 	Code    string
+	// MuteUntil carries the upstream mute expiry (unix seconds) for the
+	// "upstream_account_muted" code so callers can persist the ban window.
+	MuteUntil float64
 }
 
 type Turn struct {
@@ -125,7 +129,29 @@ func BuildTurnFromCollected(result sse.CollectResult, opts BuildOptions) Turn {
 		StopReason:        stopReason,
 	}
 	turn.Usage = BuildUsage(opts.Model, opts.Prompt, thinking, text, opts.RefFileTokens)
-	turn.Error = ValidateTurn(turn, opts.ToolChoice)
+	switch {
+	case result.BodyError != nil:
+		// The response was a plain-JSON error envelope, not an SSE stream:
+		// surface the typed cause instead of the generic empty-output error.
+		turn.Error = &OutputError{
+			Status:    result.BodyError.Status,
+			Message:   result.BodyError.Message,
+			Code:      result.BodyError.Code,
+			MuteUntil: result.BodyError.MuteUntil,
+		}
+	case result.ErrorMessage != "" && strings.TrimSpace(text) == "" && len(calls) == 0:
+		// The stream stopped on an in-stream error event before any visible
+		// output: surface the real upstream error instead of the generic
+		// empty-output classification. (When content was already collected,
+		// the partial output still wins, matching ValidateTurn semantics.)
+		turn.Error = &OutputError{
+			Status:  http.StatusServiceUnavailable,
+			Message: fmt.Sprintf("Upstream returned an error instead of a completion (%s).", result.ErrorMessage),
+			Code:    sse.UpstreamCodeError,
+		}
+	default:
+		turn.Error = ValidateTurn(turn, opts.ToolChoice)
+	}
 	if turn.Error != nil {
 		turn.StopReason = StopReasonError
 	}

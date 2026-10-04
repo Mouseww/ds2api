@@ -176,18 +176,6 @@ func StartCompletionWithAccountFallback(ctx context.Context, ds DeepSeekCaller, 
 	return StartCompletion(ctx, ds, a, stdReq, opts)
 }
 
-func prepareCurrentInputFile(ctx context.Context, ds DeepSeekCaller, a *auth.RequestAuth, stdReq promptcompat.StandardRequest, opts Options) (promptcompat.StandardRequest, *assistantturn.OutputError) {
-	if opts.CurrentInputFile == nil || stdReq.CurrentInputFileApplied {
-		return stdReq, nil
-	}
-	out, err := (history.Service{Store: opts.CurrentInputFile, DS: ds}).ApplyCurrentInputFile(ctx, a, stdReq)
-	if err != nil {
-		status, message := history.MapError(err)
-		return out, &assistantturn.OutputError{Status: status, Message: message, Code: "error"}
-	}
-	return out, nil
-}
-
 func ExecuteNonStreamWithRetry(ctx context.Context, ds DeepSeekCaller, a *auth.RequestAuth, stdReq promptcompat.StandardRequest, opts Options) (NonStreamResult, *assistantturn.OutputError) {
 	// One shared failure policy per request: the start phase and the
 	// collect/retry phase share the re-check / refresh / switch budgets.
@@ -221,6 +209,50 @@ func ExecuteNonStreamStartedWithRetry(ctx context.Context, ds DeepSeekCaller, a 
 	for {
 		turn, outErr := collectAttempt(currentResp, stdReq, usagePrompt, opts)
 		if outErr != nil {
+			if sse.IsUpstreamBodyErrorCode(outErr.Code) {
+				// Typed JSON-envelope rejection (HTTP 200 with a plain-JSON
+				// error body instead of an SSE stream): never a synthetic
+				// empty-output retry — the model never produced anything.
+				switch policy.HandleUpstreamBodyError(ctx, outErr.Code, outErr.MuteUntil) {
+				case FailureActionRetrySameAccount:
+					// INVALID_POW_RESPONSE (or a token refresh from the
+					// upstream-unavailable ladder): retry the same account
+					// with a fresh PoW and the unchanged payload — no
+					// synthetic-retry suffix, no parent_message_id.
+					retryPow, powErr := ds.GetPow(ctx, a, maxAttempts)
+					if powErr != nil {
+						return NonStreamResult{SessionID: sessionID, Payload: payload, Attempts: attempts}, outErr
+					}
+					nextResp, callErr := ds.CallCompletion(ctx, a, clonePayload(payload), retryPow, maxAttempts)
+					if callErr != nil {
+						return NonStreamResult{SessionID: sessionID, Payload: payload, Attempts: attempts}, outErr
+					}
+					config.Logger.Info("[completion_runtime_body_error_retry] retrying with fresh proof-of-work", "surface", stdReq.Surface, "stream", false, "error_code", outErr.Code, "account", a.AccountID)
+					pow = retryPow
+					currentResp = nextResp
+					continue
+				case FailureActionSwitchedAccount:
+					// Muted account (or the upstream-unavailable ladder chose
+					// a switch): restart the completion on the new lease.
+					switched, switchErr := startStandardCompletionOnAlternateAccount(ctx, ds, a, stdReq, opts, maxAttempts)
+					if switchErr != nil {
+						return NonStreamResult{SessionID: sessionID, Payload: payload, Attempts: attempts}, switchErr
+					}
+					if switched.Response != nil {
+						config.Logger.Info("[completion_runtime_body_error_switch] retrying after upstream body error", "surface", stdReq.Surface, "stream", false, "error_code", outErr.Code, "account", a.AccountID)
+						sessionID = switched.SessionID
+						payload = switched.Payload
+						pow = switched.Pow
+						currentResp = switched.Response
+						usagePrompt = stdReq.PromptTokenText
+						accumulatedThinking = ""
+						accumulatedRawThinking = ""
+						accumulatedToolDetectionThinking = ""
+						continue
+					}
+				}
+				return NonStreamResult{SessionID: sessionID, Payload: payload, Attempts: attempts}, outErr
+			}
 			if canRetryOnAlternateAccount(ctx, policy, outErr, opts.RetryEnabled, &accountSwitchAttempted) {
 				switched, switchErr := startStandardCompletionOnAlternateAccount(ctx, ds, a, stdReq, opts, maxAttempts)
 				if switchErr != nil {
@@ -424,6 +456,26 @@ func collectAttempt(resp *http.Response, stdReq promptcompat.StandardRequest, us
 		return assistantturn.Turn{}, &assistantturn.OutputError{Status: resp.StatusCode, Message: message, Code: "error"}
 	}
 	result := sse.CollectStream(resp, stdReq.Thinking, false)
+	if result.BodyError != nil {
+		// Plain-JSON error envelope instead of an SSE stream: surface the
+		// typed cause so the retry loop can act on it.
+		return assistantturn.Turn{}, &assistantturn.OutputError{
+			Status:    result.BodyError.Status,
+			Message:   result.BodyError.Message,
+			Code:      result.BodyError.Code,
+			MuteUntil: result.BodyError.MuteUntil,
+		}
+	}
+	if result.ErrorMessage != "" && strings.TrimSpace(result.Text) == "" && strings.TrimSpace(result.Thinking) == "" {
+		// The stream stopped on an in-stream error event before any visible
+		// output: surface the real upstream error instead of letting it
+		// degrade into the generic empty-output classification.
+		return assistantturn.Turn{}, &assistantturn.OutputError{
+			Status:  http.StatusServiceUnavailable,
+			Message: fmt.Sprintf("Upstream returned an error instead of a completion (%s).", result.ErrorMessage),
+			Code:    sse.UpstreamCodeError,
+		}
+	}
 	return assistantturn.BuildTurnFromCollected(result, buildOptions(stdReq, usagePrompt, opts)), nil
 }
 

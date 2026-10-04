@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"os"
 	"strings"
@@ -20,21 +22,26 @@ import (
 //   - no stored token → log in once and persist it (provisioning);
 //   - stored token, refreshed recently (by traffic or the keeper itself) →
 //     skip: it is fresh by construction;
-//   - stored token → validate it with the read-only TokenProbe. A single
-//     rejection is tolerated (it may be a transient network error); after
-//     keeperFailureThreshold consecutive rejections the token is treated
-//     as stale and the account is re-logged-in.
+//   - stored token whose JWT exp claim has already passed (or passes
+//     within one sweep interval) → refresh it right away, without probing:
+//     the token itself declares it stale, so a probe would only burn a
+//     round trip — under the default cadence a pooled token never expires
+//     in service;
+//   - other stored token → validate it with the read-only TokenProbe. A
+//     single rejection is tolerated (it may be a transient network error);
+//     after keeperFailureThreshold consecutive rejections the token is
+//     treated as stale and the account is re-logged-in.
 //
 // All logins go through the shared performLogin singleflight and the
 // per-egress login gate, so the keeper can never stampede DeepSeek's login
 // endpoint: it queues behind the same pacing as every other login source.
-// Keeper login failures (bad password, captcha, upstream errors) are
-// tolerated twice, then the account is paused for keeperFailurePause before
-// the keeper tries again — a permanently broken account surfaces as a
-// recurring warning instead of a login storm. ErrLoginThrottled and
-// context cancellation are local/transient conditions and never count as
-// failures. The keeper never evicts accounts on its own; eviction stays
-// with the failure policy (refresh_failed / error_count) and ban detection.
+// A token refresh that fails keeperFailureThreshold times in a row (bad
+// password, deleted account, persistent upstream rejection) evicts the
+// account from the active pool with reason "refresh_failed": the account
+// is auto-disabled, a standby account is promoted to take over its
+// traffic, and it returns only via manual re-enable. ErrLoginThrottled
+// and context cancellation are local/transient conditions and never count
+// as failures.
 //
 // Operators control the cadence with DS2API_TOKEN_KEEP_INTERVAL (Go duration
 // syntax, e.g. "5m", "30s"); "off", "disabled" or "0" disables the keeper.
@@ -42,15 +49,13 @@ var (
 	// poolTokenKeepInterval is how often the keeper sweeps the active pool.
 	// Parsed once at startup from DS2API_TOKEN_KEEP_INTERVAL; zero disables.
 	poolTokenKeepInterval = envPoolTokenKeepInterval()
-
-	// keeperFailurePause is how long the keeper stops trying an account
-	// after keeperFailureThreshold consecutive failures. Tests shrink it.
-	keeperFailurePause = time.Hour
 )
 
-// keeperFailureThreshold mirrors the error-count eviction rule: two
-// consecutive keeper failures (probe rejections or login errors) before the
-// keeper acts (relogin) or pauses (after a failed relogin).
+// keeperFailureThreshold is the two-strike rule shared by both keeper
+// failure kinds: two consecutive probe rejections declare a stored token
+// stale (triggering a relogin), and two consecutive refresh (login)
+// failures evict the account from the active pool (reason
+// "refresh_failed").
 const keeperFailureThreshold = 2
 
 // defaultPoolTokenKeepInterval is the default sweep cadence.
@@ -104,6 +109,45 @@ func (r *Resolver) StartPoolTokenKeeper(ctx context.Context) {
 	}()
 }
 
+// tokenExpiry decodes the expiry time embedded in a DeepSeek session token.
+// DeepSeek tokens are JWTs: the middle base64url segment carries a JSON
+// payload whose "exp" claim (unix seconds) states when the token lapses.
+// The signature is not verified — only the expiry timestamp is needed, and
+// the token's authenticity was established by the login that produced it.
+// Tokens that are not decodable JWTs, or carry no positive numeric exp,
+// return ok=false and fall back to probe-based staleness detection.
+func tokenExpiry(token string) (time.Time, bool) {
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		return time.Time{}, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return time.Time{}, false
+	}
+	var claims struct {
+		Exp float64 `json:"exp"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return time.Time{}, false
+	}
+	if claims.Exp <= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(int64(claims.Exp), 0), true
+}
+
+// tokenExpiringSoon reports whether the token's JWT exp claim has already
+// passed or passes within margin. Tokens without a decodable exp claim are
+// never expiring soon — their staleness is detected by the TokenProbe.
+func tokenExpiringSoon(token string, margin time.Duration) bool {
+	exp, ok := tokenExpiry(token)
+	if !ok {
+		return false
+	}
+	return !exp.After(time.Now().Add(margin))
+}
+
 // ensurePoolTokens walks the active pool once and makes sure every account
 // in it has a usable token. Sequential by design: logins are paced by the
 // per-egress gate anyway, and a quiet background sweep never competes with
@@ -117,20 +161,19 @@ func (r *Resolver) ensurePoolTokens(ctx context.Context) {
 		if !ok || !acc.IsEnabled() || acc.IsBanned() {
 			continue
 		}
-		// Paused after repeated failures: wait out the pause window, then
-		// start a fresh attempt cycle.
-		if r.keeperFailureCount(id) >= keeperFailureThreshold {
-			if time.Since(r.keeperLastFailedTime(id)) < keeperFailurePause {
-				continue
-			}
-			r.resetKeeperFailures(id)
-		}
 
 		token := strings.TrimSpace(acc.Token)
 		if token != "" && r.tokenRefreshedRecently(id) {
 			continue // token obtained moments ago by traffic or the keeper
 		}
-		if token != "" && r.TokenProbe != nil {
+
+		// Timely refresh: a token whose exp has passed (or passes within
+		// one sweep interval) is refreshed without probing — the token
+		// itself already declares it stale, so probing it would only burn
+		// a round trip.
+		needsRefresh := token == "" || tokenExpiringSoon(token, poolTokenKeepInterval)
+
+		if !needsRefresh && r.TokenProbe != nil {
 			probeCtx := WithAuth(ctx, &RequestAuth{
 				UseConfigToken: false,
 				AccountID:      id,
@@ -139,16 +182,25 @@ func (r *Resolver) ensurePoolTokens(ctx context.Context) {
 				TriedAccounts:  map[string]bool{},
 			})
 			if err := r.TokenProbe(probeCtx, token); err == nil {
+				// A passing probe also proves the account itself healthy,
+				// so an earlier refresh failure was transient: reset both
+				// failure streaks.
 				r.resetKeeperFailures(id)
+				r.resetProbeFailures(id)
 				continue // stored token works
 			}
-			// Rejected once may be a transient network error; only treat the
-			// token as stale after consecutive rejections.
-			if r.bumpKeeperFailures(id) < keeperFailureThreshold {
+			// Rejected once may be a transient network error; only treat
+			// the token as stale after consecutive rejections.
+			if r.bumpProbeFailures(id) < keeperFailureThreshold {
 				continue
 			}
 			config.Logger.Info("[pool_token_keeper] stored token rejected repeatedly, re-logging in",
 				"account", id)
+			needsRefresh = true
+		}
+
+		if !needsRefresh {
+			continue
 		}
 
 		if err := r.loginAndPersist(ctx, &RequestAuth{
@@ -173,13 +225,27 @@ func (r *Resolver) ensurePoolTokens(ctx context.Context) {
 				// Shutdown: stop the sweep without penalty.
 				return
 			default:
-				r.bumpKeeperFailures(id)
-				config.Logger.Warn("[pool_token_keeper] login failed",
-					"account", id, "error", err)
+				// Two consecutive refresh failures mean the account can no
+				// longer authenticate itself (bad password, deleted
+				// account, persistent upstream rejection): evict it from
+				// the active pool so a standby account takes over its
+				// traffic. The account is auto-disabled with reason
+				// "refresh_failed" and returns only via manual re-enable.
+				if r.bumpKeeperFailures(id) >= keeperFailureThreshold {
+					config.Logger.Warn("[pool_token_keeper] token refresh failed twice consecutively, evicting account",
+						"account", id)
+					r.evictAccountFromPool(id, "refresh_failed")
+					r.resetKeeperFailures(id)
+					r.resetProbeFailures(id)
+				} else {
+					config.Logger.Warn("[pool_token_keeper] login failed",
+						"account", id, "error", err)
+				}
 			}
 			continue
 		}
 		r.resetKeeperFailures(id)
+		r.resetProbeFailures(id)
 		config.Logger.Info("[pool_token_keeper] token ready",
 			"account", id, "had_token", token != "")
 	}
@@ -196,36 +262,44 @@ func (r *Resolver) tokenRefreshedRecently(accountID string) bool {
 	return ok && !last.IsZero() && time.Since(last) < poolTokenKeepInterval
 }
 
-// keeperFailureCount returns the account's consecutive keeper failures.
+// keeperFailureCount returns the account's consecutive refresh (login)
+// failures.
 func (r *Resolver) keeperFailureCount(accountID string) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.keeperFailures[accountID]
 }
 
-// keeperLastFailedTime returns when the account last failed a keeper step
-// (zero time if never).
-func (r *Resolver) keeperLastFailedTime(accountID string) time.Time {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.keeperLastFailedAt[accountID]
-}
-
-// bumpKeeperFailures records one keeper failure and returns the new
-// consecutive-failure count.
+// bumpKeeperFailures records one refresh (login) failure and returns the
+// new consecutive-failure count.
 func (r *Resolver) bumpKeeperFailures(accountID string) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.keeperFailures[accountID]++
-	r.keeperLastFailedAt[accountID] = time.Now()
 	return r.keeperFailures[accountID]
 }
 
-// resetKeeperFailures clears the failure state after any success (probe or
-// login).
+// resetKeeperFailures clears the refresh-failure streak after a successful
+// login (or a passing probe).
 func (r *Resolver) resetKeeperFailures(accountID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.keeperFailures, accountID)
-	delete(r.keeperLastFailedAt, accountID)
+}
+
+// bumpProbeFailures records one probe rejection and returns the new
+// consecutive-rejection count.
+func (r *Resolver) bumpProbeFailures(accountID string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.keeperProbeFailures[accountID]++
+	return r.keeperProbeFailures[accountID]
+}
+
+// resetProbeFailures clears the probe-rejection streak after a passing
+// probe or a successful relogin.
+func (r *Resolver) resetProbeFailures(accountID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.keeperProbeFailures, accountID)
 }

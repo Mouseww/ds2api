@@ -306,9 +306,11 @@ func (s *Store) Save() error {
 		Logger.Info("[save_config] source from env, skip write")
 		return nil
 	}
-	persistCfg := s.cfg.Clone()
-	persistCfg.ClearAccountTokens()
-	b, err := json.MarshalIndent(persistCfg, "", "  ")
+	// Account tokens are persisted so restarts reuse them instead of
+	// forcing the whole active pool to re-login. Leak-sensitive surfaces
+	// (ExportJSONAndBase64, admin API snapshots, Vercel sync, env bootstrap)
+	// still strip tokens.
+	b, err := json.MarshalIndent(s.cfg, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -324,9 +326,9 @@ func (s *Store) saveLocked() error {
 		Logger.Info("[save_config] source from env, skip write")
 		return nil
 	}
-	persistCfg := s.cfg.Clone()
-	persistCfg.ClearAccountTokens()
-	b, err := json.MarshalIndent(persistCfg, "", "  ")
+	// See Save(): account tokens are persisted for restart reuse; export
+	// surfaces strip them separately.
+	b, err := json.MarshalIndent(s.cfg, "", "  ")
 	if err != nil {
 		return err
 	}

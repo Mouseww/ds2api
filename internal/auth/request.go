@@ -100,24 +100,27 @@ type Resolver struct {
 	accountErrors    map[string]int
 	loginFlights     map[string]*loginFlight
 
-	// Pool-token-keeper state: consecutive keeper failures per account
-	// (probe rejections or login failures) and when the last one happened.
-	// Guarded by mu.
-	keeperFailures     map[string]int
-	keeperLastFailedAt map[string]time.Time
+	// Pool-token-keeper state, guarded by mu:
+	//   - keeperFailures: consecutive token-refresh (login) failures per
+	//     account; reaching keeperFailureThreshold (2) evicts the account
+	//     from the active pool with reason "refresh_failed".
+	//   - keeperProbeFailures: consecutive TokenProbe rejections per
+	//     account; reaching the threshold triggers a relogin.
+	keeperFailures      map[string]int
+	keeperProbeFailures map[string]int
 }
 
 func NewResolver(store *config.Store, pool *account.Pool, login LoginFunc) *Resolver {
 	return &Resolver{
-		Store:              store,
-		Pool:               pool,
-		Login:              login,
-		tokenRefreshedAt:   map[string]time.Time{},
-		banRecheckedAt:     map[string]time.Time{},
-		accountErrors:      map[string]int{},
-		loginFlights:       map[string]*loginFlight{},
-		keeperFailures:     map[string]int{},
-		keeperLastFailedAt: map[string]time.Time{},
+		Store:               store,
+		Pool:                pool,
+		Login:               login,
+		tokenRefreshedAt:    map[string]time.Time{},
+		banRecheckedAt:      map[string]time.Time{},
+		accountErrors:       map[string]int{},
+		loginFlights:        map[string]*loginFlight{},
+		keeperFailures:      map[string]int{},
+		keeperProbeFailures: map[string]int{},
 	}
 }
 
@@ -426,6 +429,27 @@ func (r *Resolver) clearAccountErrors(accountID string) {
 	delete(r.accountErrors, accountID)
 }
 
+// markAccountMuted records a completion-time "user is muted" rejection on the
+// leased account: it persists the ban window (so the unban monitor can
+// auto-recover the account after the mute expires), disables the account with
+// reason "banned", and removes it from the pool. The stored token and
+// credentials are preserved (per spec R3.4), so re-enabling the account later
+// does not require re-entering them. Marking an already-disabled account is
+// idempotent and never overwrites its original ban state.
+func (r *Resolver) markAccountMuted(accountID string, muteUntil float64) {
+	if r == nil || r.Store == nil || strings.TrimSpace(accountID) == "" {
+		return
+	}
+	if acc, ok := r.Store.FindAccount(accountID); ok && !acc.IsEnabled() {
+		return
+	}
+	if err := r.Store.UpdateAccountBanStatus(accountID, 1, muteUntil, 0); err != nil {
+		config.Logger.Warn("[ban_detect] persisting mute state failed", "account", accountID, "error", err)
+		return
+	}
+	r.evictAccountFromPool(accountID, "banned")
+}
+
 // reenableIfUnbanned restores an account that was auto-disabled with reason
 // "banned" once a fresh login shows the mute is no longer active. Manual
 // disables and already-enabled accounts are left untouched.
@@ -684,6 +708,21 @@ func (a *RequestAuth) NoteAccountError() {
 		return
 	}
 	a.resolver.NoteAccountError(a.AccountID)
+}
+
+// MarkAccountMuted records a completion-time "user is muted" rejection on the
+// leased account: it persists the ban window (so the unban monitor can
+// auto-recover the account after the mute expires), disables the account with
+// reason "banned", and removes it from the pool. A direct-token request never
+// touches account state.
+func (a *RequestAuth) MarkAccountMuted(muteUntil float64) {
+	if a == nil || a.resolver == nil {
+		return
+	}
+	if !a.UseConfigToken || a.AccountID == "" {
+		return
+	}
+	a.resolver.markAccountMuted(a.AccountID, muteUntil)
 }
 
 func (r *Resolver) Release(a *RequestAuth) {

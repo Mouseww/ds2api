@@ -69,6 +69,81 @@ func ExecuteStreamWithRetry(ctx context.Context, ds DeepSeekCaller, a *auth.Requ
 	currentResp := initialResp
 	currentPayload := clonePayload(payload)
 	for {
+		if bodyErr := sniffUpstreamBodyError(currentResp); bodyErr != nil {
+			// Typed JSON-envelope rejection (HTTP 200 with a plain-JSON error
+			// body instead of an SSE stream): never a synthetic empty-output
+			// retry — the model never produced anything. Report through
+			// OnRetryFailure so the client sees the real cause instead of a
+			// generic "no output" chunk.
+			switch policy.HandleUpstreamBodyError(ctx, bodyErr.Code, bodyErr.MuteUntil) {
+			case FailureActionRetrySameAccount:
+				// INVALID_POW_RESPONSE (or a token refresh from the
+				// upstream-unavailable ladder): retry the same account with a
+				// fresh PoW and the unchanged payload — no synthetic-retry
+				// suffix, no parent_message_id.
+				retryPow, powErr := ds.GetPow(ctx, a, maxAttempts)
+				if powErr != nil {
+					if hooks.OnRetryFailure != nil {
+						hooks.OnRetryFailure(bodyErr.Status, bodyErr.Message, bodyErr.Code)
+					}
+					return
+				}
+				nextResp, callErr := ds.CallCompletion(ctx, a, clonePayload(currentPayload), retryPow, maxAttempts)
+				if callErr != nil {
+					if hooks.OnRetryFailure != nil {
+						hooks.OnRetryFailure(bodyErr.Status, bodyErr.Message, bodyErr.Code)
+					}
+					config.Logger.Warn("[completion_runtime_body_error_retry] retry request failed", "surface", surface, "stream", opts.Stream, "error_code", bodyErr.Code, "account", a.AccountID, "error", callErr)
+					return
+				}
+				if nextResp.StatusCode != http.StatusOK {
+					body, readErr := io.ReadAll(nextResp.Body)
+					if readErr != nil {
+						config.Logger.Warn("[completion_runtime_body_error_retry] retry error body read failed", "surface", surface, "stream", opts.Stream, "error_code", bodyErr.Code, "error", readErr)
+					}
+					closeRetryBody(surface, nextResp.Body)
+					msg := strings.TrimSpace(string(body))
+					if msg == "" {
+						msg = http.StatusText(nextResp.StatusCode)
+					}
+					if hooks.OnRetryFailure != nil {
+						hooks.OnRetryFailure(nextResp.StatusCode, msg, "error")
+					}
+					return
+				}
+				config.Logger.Info("[completion_runtime_body_error_retry] retrying with fresh proof-of-work", "surface", surface, "stream", opts.Stream, "error_code", bodyErr.Code, "account", a.AccountID)
+				pow = retryPow
+				currentResp = nextResp
+				continue
+			case FailureActionSwitchedAccount:
+				// Muted account (or the upstream-unavailable ladder chose a
+				// switch): restart the completion on the new lease.
+				switched, switchErr := startPayloadCompletionOnAlternateAccount(ctx, ds, a, payload, opts, maxAttempts)
+				if switchErr != nil {
+					if hooks.OnRetryFailure != nil {
+						hooks.OnRetryFailure(switchErr.Status, switchErr.Message, switchErr.Code)
+					}
+					return
+				}
+				if switched.Response != nil {
+					config.Logger.Info("[completion_runtime_body_error_switch] retrying after upstream body error", "surface", surface, "stream", opts.Stream, "error_code", bodyErr.Code, "account", a.AccountID)
+					currentResp = switched.Response
+					currentPayload = switched.Payload
+					pow = switched.Pow
+					if hooks.OnAccountSwitch != nil {
+						hooks.OnAccountSwitch(switched.SessionID)
+					}
+					if hooks.OnRetryPrompt != nil {
+						hooks.OnRetryPrompt(opts.UsagePrompt)
+					}
+					continue
+				}
+			}
+			if hooks.OnRetryFailure != nil {
+				hooks.OnRetryFailure(bodyErr.Status, bodyErr.Message, bodyErr.Code)
+			}
+			return
+		}
 		allowAccountSwitch := opts.RetryEnabled && attempts >= retryMax && !accountSwitchAttempted && a != nil && a.UseConfigToken
 		terminalWritten, retryable := hooks.ConsumeAttempt(currentResp, opts.RetryEnabled && (attempts < retryMax || allowAccountSwitch))
 		if terminalWritten {
